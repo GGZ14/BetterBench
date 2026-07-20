@@ -1,0 +1,21 @@
+{
+  "temperature": 0.7,
+  "top_p": 0.95,
+  "top_k": 20,
+  "greedy": false,
+  "warmup": 3,
+  "runs_per_category": 20,
+  "unique_nonce": true,
+  "run_concurrency": true,
+  "concurrency_levels": [1, 2, 4, 8, 16],
+  "concurrency_requests": 48,
+  "weights": {
+    "code": 0.30, "reasoning": 0.20, "prose": 0.15,
+    "json": 0.15, "file_edit": 0.10, "summarization": 0.10
+  },
+  "conf": 0.95,
+  "target_mde_pct": 1.0,
+  "ab_max_pairs": 200,
+  "ab_min_pairs": 12,
+  "timeout_s": 600.0
+}

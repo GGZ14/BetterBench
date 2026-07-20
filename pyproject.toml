@@ -1,0 +1,30 @@
+[project]
+name = "betterbench"
+version = "0.1.0"
+description = "A real-world, percentile-based LLM inference benchmark for any OpenAI-compatible endpoint."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "BetterBench contributors" }]
+keywords = ["llm", "benchmark", "inference", "vllm", "latency", "throughput", "openai"]
+dependencies = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+report = ["jinja2>=3.1"]     # only needed for the HTML report; markdown works without it
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+betterbench = "betterbench.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["betterbench"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"corpus" = "betterbench/corpus"
+"config" = "betterbench/config"
