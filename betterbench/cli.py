@@ -32,7 +32,15 @@ def cmd_run(args):
     })
     corpus = load_corpus(args.corpus, args.categories)
     if not corpus:
-        sys.exit("no prompts found; check --corpus / --categories")
+        if args.corpus:
+            sys.exit(f"no prompts found in --corpus {args.corpus!r} "
+                     f"(need *.jsonl files; check --categories {args.categories})")
+        from .corpus import corpus_search_paths
+        searched = "\n  ".join(str(p) for p in corpus_search_paths())
+        sys.exit("no prompts found. Looked in:\n  " + searched +
+                 "\nIf you installed with `pip install -e .`, this is a known "
+                 "path issue — update to the latest version, or pass "
+                 "--corpus /path/to/corpus/v1 explicitly.")
     print(f"BetterBench {__version__} · corpus v{CORPUS_VERSION} · "
           f"{sum(len(v) for v in corpus.values())} prompts in {len(corpus)} categories")
 

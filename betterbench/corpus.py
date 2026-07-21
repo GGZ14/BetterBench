@@ -6,7 +6,33 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 
-_DEFAULT_DIR = Path(__file__).resolve().parent / "corpus" / "v1"
+_HERE = Path(__file__).resolve().parent
+
+
+def corpus_search_paths(version: str = "v1") -> list[Path]:
+    """Candidate corpus locations, in priority order.
+
+    A built wheel copies ``corpus`` to ``betterbench/corpus`` (see pyproject
+    force-include), so the in-package path wins there. An editable install
+    (``pip install -e .``) or a git checkout uses the source tree as-is, where
+    the corpus sits at the repo root — hence the parent fallback. Without this,
+    editable installs raise "no prompts found".
+    """
+    return [
+        _HERE / "corpus" / version,          # installed wheel layout
+        _HERE.parent / "corpus" / version,   # source tree / editable layout
+    ]
+
+
+def _resolve_default_dir(version: str = "v1") -> Path:
+    for d in corpus_search_paths(version):
+        if d.is_dir() and any(d.glob("*.jsonl")):
+            return d
+    # nothing found — return the first candidate so callers can report a path
+    return corpus_search_paths(version)[0]
+
+
+_DEFAULT_DIR = _resolve_default_dir()
 
 
 @dataclass
