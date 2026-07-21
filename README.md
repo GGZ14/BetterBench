@@ -37,6 +37,11 @@ betterbench ab --endpoint-a http://host:8080/v1 --endpoint-b http://host:8081/v1
 (1% low = slowest tokens / median / 99% high = fastest), decode t/s median ± IQR, and a
 weighted combined score.
 
+**Prompt-processing (prefill) sweep** — prefill throughput (prompt tokens ÷ TTFT) at
+increasing input depth (2K → 64K), with a cold prefix cache and tiny decode, so you see how
+prompt processing scales for long-context / RAG / big-file workloads. A `PP t/s` column also
+appears per category in the single-stream table.
+
 **Concurrency sweep** — aggregate throughput and per-request TTFT/decode percentiles at
 increasing load, revealing the throughput/latency knee.
 
