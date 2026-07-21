@@ -11,7 +11,7 @@ import time
 
 import numpy as np
 
-from .client import RunResult, stream_chat
+from .client import RunResult, is_context_length_error, stream_chat
 from .config import Config
 from .corpus import Prompt, nonce, with_nonce
 from .metrics import (paired_ci_halfwidth_pct, paired_compare,
@@ -87,10 +87,31 @@ async def concurrency_sweep(endpoint: str, model: str,
 # --------------------------------------------------------------------------- #
 # Prompt-processing (prefill) sweep — throughput vs input depth
 # --------------------------------------------------------------------------- #
-async def prefill_sweep(endpoint: str, model: str, cfg: Config, log=print) -> list[dict]:
+async def prefill_sweep(endpoint: str, model: str, cfg: Config, log=print,
+                        max_ctx: int | None = None) -> list[dict]:
+    """Sweep prefill throughput vs input depth.
+
+    Depths that can't fit the model's context window are skipped rather than
+    run, so a limited-context server doesn't return HTTP 400s mid-sweep:
+      * if `max_ctx` is known, a depth needing more than it (plus the tiny
+        decode and a small margin) is skipped up front;
+      * regardless, if the server rejects a depth at runtime with a
+        context-length error, that depth is marked skipped and abandoned.
+    """
     rng = random.Random(2024)
     out = []
+
+    def skip_row(depth: int, reason: str) -> dict:
+        return {"target_depth": depth, "skipped": True, "reason": reason,
+                "prompt_tokens": [], "ttft_ms": [], "pp_tps": []}
+
     for depth in cfg.prefill_depths:
+        need = depth + cfg.prefill_max_tokens + cfg.prefill_ctx_margin
+        if max_ctx is not None and need > max_ctx:
+            log(f"[prefill] skip depth ~{depth}: needs ~{need} tok > model context {max_ctx}")
+            out.append(skip_row(depth, f"exceeds max context {max_ctx} (needs ~{need} tok)"))
+            continue
+
         log(f"[prefill] depth ~{depth} tok: warmup {cfg.prefill_warmup} + {cfg.prefill_runs}")
 
         async def one():
@@ -100,15 +121,26 @@ async def prefill_sweep(endpoint: str, model: str, cfg: Config, log=print) -> li
                                      top_p=cfg.top_p, top_k=cfg.top_k, seed=cfg.seed,
                                      category="prefill", prompt_id=f"pp{depth}",
                                      timeout=cfg.timeout_s)
-        for _ in range(cfg.prefill_warmup):
-            await one()
+
+        rejected = False
         recs = []
-        for _ in range(cfg.prefill_runs):
+        for _ in range(cfg.prefill_warmup + cfg.prefill_runs):
             r = await one()
+            if is_context_length_error(r.error):
+                rejected = True
+                break
+            recs.append(r)
+        if rejected:
+            log(f"[prefill] skip depth ~{depth}: server rejected (context length "
+                f"exceeded){'' if max_ctx else '; consider --max-model-len'}")
+            out.append(skip_row(depth, "server rejected: exceeds context length"))
+            continue
+
+        measured = recs[cfg.prefill_warmup:]          # drop warmup
+        for r in measured:
             if not r.ok:
                 log(f"  ! prefill depth {depth}: {r.error}")
-            recs.append(r)
-        ok = [r for r in recs if r.ok]
+        ok = [r for r in measured if r.ok]
         out.append({
             "target_depth": depth,
             "prompt_tokens": [r.prompt_tokens for r in ok if r.prompt_tokens],

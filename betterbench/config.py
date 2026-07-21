@@ -31,6 +31,11 @@ class Config:
     prefill_runs: int = 8
     prefill_warmup: int = 2
     prefill_max_tokens: int = 16     # keep decode tiny so TTFT is dominated by prefill
+    prefill_ctx_margin: int = 256    # headroom (chat template/system tokens) when ctx-checking
+
+    # context window: override the model's max context; if None it is auto-detected
+    # from GET /v1/models (max_model_len). Depths that don't fit are skipped, not run.
+    max_model_len: int | None = None
 
     # combined-score category weights (must cover the categories you run)
     weights: dict[str, float] = field(default_factory=lambda: {

@@ -20,7 +20,12 @@ server's reported `usage`.
   (`prefill_max_tokens`) so the number reflects prefill, not generation. The target depth is
   approximate (built at ~4 chars/token); the reported depth is the server's actual
   `usage.prompt_tokens`, so throughput is always tied to the real token count. Prefill is
-  typically far more repeatable run-to-run than decode.
+  typically far more repeatable run-to-run than decode. Depths larger than the model's
+  context window are **skipped, not run**: the window is auto-detected from `GET /v1/models`
+  (`max_model_len`) or set with `--max-model-len`, and any depth needing more than it (plus the
+  tiny decode and a small margin) is dropped up front. As a fallback, a context-length HTTP 400
+  at runtime also marks that depth skipped rather than aborting the sweep. Skipped depths are
+  recorded in `results.json` and shown as `skipped` in the report.
 
 Reasoning-channel tokens (`reasoning` / `reasoning_content`) are counted as generated tokens;
 TTFT is time to the first token of *any* channel.

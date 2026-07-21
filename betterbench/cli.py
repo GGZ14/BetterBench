@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from . import CORPUS_VERSION, RESULTS_SCHEMA, __version__
+from .client import get_model_context
 from .config import Config
 from .corpus import load_corpus
 from .env import content_hash, fingerprint
@@ -28,7 +29,7 @@ def cmd_run(args):
     cfg = _load(args.config, {
         "runs_per_category": args.runs, "warmup": args.warmup,
         "greedy": args.greedy or None, "run_concurrency": not args.no_concurrency,
-        "seed": args.seed,
+        "seed": args.seed, "max_model_len": args.max_model_len,
     })
     corpus = load_corpus(args.corpus, args.categories)
     if not corpus:
@@ -55,11 +56,22 @@ def cmd_run(args):
     results["env"]["corpus_hash"] = content_hash(
         {c: [p.id for p in ps] for c, ps in corpus.items()})
 
+    # Resolve the model's context window: explicit override, else auto-detect.
+    # Used to skip prefill depths that wouldn't fit (avoids HTTP 400s mid-sweep).
+    max_ctx = cfg.max_model_len or get_model_context(args.endpoint, args.model)
+    if max_ctx:
+        print(f"model max context: {max_ctx} tokens"
+              f"{'' if cfg.max_model_len else ' (auto-detected from /v1/models)'}")
+    else:
+        print("model max context: unknown — will skip any depth the server rejects "
+              "(pass --max-model-len to skip up front)")
+    results["env"]["max_model_len"] = max_ctx
+
     results["single_stream"] = asyncio.run(
         single_stream(args.endpoint, args.model, corpus, cfg))
     if cfg.run_prefill and not args.no_prefill:
         results["prefill"] = asyncio.run(
-            prefill_sweep(args.endpoint, args.model, cfg))
+            prefill_sweep(args.endpoint, args.model, cfg, max_ctx=max_ctx))
     if cfg.run_concurrency and not args.no_concurrency:
         results["concurrency"] = asyncio.run(
             concurrency_sweep(args.endpoint, args.model, corpus, cfg))
@@ -131,6 +143,9 @@ def main(argv=None):
     r.add_argument("--greedy", action="store_true", help="temperature=0 (reproducibility)")
     r.add_argument("--no-concurrency", action="store_true")
     r.add_argument("--no-prefill", action="store_true", help="skip the prompt-processing sweep")
+    r.add_argument("--max-model-len", type=int,
+                   help="model context window in tokens; overrides auto-detection. "
+                        "Prefill depths that don't fit are skipped instead of erroring.")
     r.add_argument("--out", default="results/run.json")
     r.set_defaults(func=cmd_run)
 

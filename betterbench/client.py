@@ -170,6 +170,55 @@ async def stream_chat(base_url: str, model: str, messages: list[dict],
     return await asyncio.to_thread(stream_chat_sync, base_url, model, messages, **kwargs)
 
 
+def get_model_context(base_url: str, model: str,
+                      timeout: float = 5.0) -> int | None:
+    """Best-effort probe of the model's max context window via GET /v1/models.
+
+    vLLM (and several other OpenAI-compatible servers) expose `max_model_len`
+    per model entry. Returns the length in tokens, or None if unavailable — in
+    which case the caller falls back to runtime detection of context-length
+    errors. Never raises.
+    """
+    url = base_url.rstrip("/") + "/models"
+    u = urllib.parse.urlparse(url)
+    ConnCls = (http.client.HTTPSConnection if u.scheme == "https"
+               else http.client.HTTPConnection)
+    try:
+        conn = ConnCls(u.hostname, u.port or (443 if u.scheme == "https" else 80),
+                       timeout=timeout)
+        conn.request("GET", u.path + (("?" + u.query) if u.query else ""))
+        resp = conn.getresponse()
+        if resp.status != 200:
+            conn.close()
+            return None
+        obj = json.loads(resp.read().decode("utf-8", "replace"))
+        conn.close()
+    except Exception:
+        return None
+    data = obj.get("data") or []
+    if not data:
+        return None
+    entry = next((m for m in data if m.get("id") == model), data[0])
+    for key in ("max_model_len", "max_context_length", "context_length",
+                "max_seq_len", "context_window"):
+        v = entry.get(key)
+        if isinstance(v, int) and v > 0:
+            return v
+    return None
+
+
+def is_context_length_error(err: str | None) -> bool:
+    """True if a request error is the server rejecting an over-long prompt."""
+    if not err:
+        return False
+    e = err.lower()
+    return ("maximum context length" in e
+            or "context length" in e
+            or "reduce the length" in e
+            or "longer than the maximum" in e
+            or "please reduce" in e)
+
+
 def ping(base_url: str, timeout: float = 3.0) -> bool:
     url = base_url.rstrip("/") + "/models"
     u = urllib.parse.urlparse(url)

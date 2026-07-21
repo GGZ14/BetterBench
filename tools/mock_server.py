@@ -15,7 +15,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-def make_handler(ttft_ms: float, itl_ms: float, tokens: int):
+def make_handler(ttft_ms: float, itl_ms: float, tokens: int, max_ctx: int = 0):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -24,7 +24,10 @@ def make_handler(ttft_ms: float, itl_ms: float, tokens: int):
 
         def do_GET(self):
             if self.path.rstrip("/").endswith("/v1/models"):
-                body = json.dumps({"data": [{"id": "mock"}]}).encode()
+                entry = {"id": "mock"}
+                if max_ctx:                      # advertise context like vLLM does
+                    entry["max_model_len"] = max_ctx
+                body = json.dumps({"data": [entry]}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -42,6 +45,22 @@ def make_handler(ttft_ms: float, itl_ms: float, tokens: int):
             in_chars = sum(len(str(m.get("content", "")))
                            for m in body.get("messages", []))
             prompt_tokens = max(1, in_chars // 4)
+            # Emulate a limited-context server: reject over-long prompts the way
+            # vLLM/OpenAI do, so the harness's ctx-skip logic can be tested.
+            if max_ctx and prompt_tokens + n > max_ctx:
+                msg = (f"This model's maximum context length is {max_ctx} tokens. "
+                       f"However, you requested {n} output tokens and your prompt "
+                       f"contains {prompt_tokens} input tokens, for a total of "
+                       f"{prompt_tokens + n} tokens. Please reduce the length of the "
+                       f"input prompt or the number of requested output tokens.")
+                err = json.dumps({"error": {"message": msg, "type": "BadRequestError",
+                                            "code": 400}}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self.wfile.write(err)
+                return
             # Connection: close + no Content-Length => client reads until EOF.
             # Simpler and more robust than hand-rolled chunked framing.
             self.send_response(200)
