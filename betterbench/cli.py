@@ -13,6 +13,7 @@ from .config import Config
 from .corpus import load_corpus
 from .env import content_hash, fingerprint
 from .metrics import paired_compare
+from .html_report import render_html
 from .report import render_ab_markdown, render_markdown
 from .runner import concurrency_sweep, paired_ab, prefill_sweep, single_stream
 
@@ -23,6 +24,21 @@ def _load(cfg_path, overrides: dict) -> Config:
         if v is not None and hasattr(cfg, k):
             setattr(cfg, k, v)
     return cfg
+
+
+def _html_path(out: str, html_out: str | None) -> Path:
+    return Path(html_out) if html_out else Path(out).with_suffix(".html")
+
+
+def _emit_html(results: dict, out: str, html_out: str | None, disabled: bool) -> None:
+    """Write the standalone HTML report beside the results JSON."""
+    if disabled:
+        return
+    path = _html_path(out, html_out)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_html(results), encoding="utf-8")
+    print(f"\nwrote {path}  —  open it in a browser for the charted report:")
+    print(f"    file://{path.resolve()}")
 
 
 def cmd_run(args):
@@ -79,10 +95,18 @@ def cmd_run(args):
     Path(args.out).write_text(json.dumps(results, indent=2))
     print(f"\nwrote {args.out}")
     print(render_markdown(results))
+    _emit_html(results, args.out, args.html_out, args.no_html)
 
 
 def cmd_report(args):
     results = json.loads(Path(args.results).read_text())
+    if args.html:
+        path = _html_path(args.results, args.out)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_html(results), encoding="utf-8")
+        print(f"wrote {path}")
+        print(f"    file://{path.resolve()}")
+        return
     md = render_markdown(results)
     if args.out:
         Path(args.out).write_text(md)
@@ -147,10 +171,15 @@ def main(argv=None):
                    help="model context window in tokens; overrides auto-detection. "
                         "Prefill depths that don't fit are skipped instead of erroring.")
     r.add_argument("--out", default="results/run.json")
+    r.add_argument("--no-html", action="store_true",
+                   help="skip the standalone HTML report (written beside --out by default)")
+    r.add_argument("--html-out", help="path for the HTML report (default: --out with .html)")
     r.set_defaults(func=cmd_run)
 
     rep = sub.add_parser("report", help="render a results.json as markdown")
     rep.add_argument("results"); rep.add_argument("--out")
+    rep.add_argument("--html", action="store_true",
+                     help="render the standalone HTML report instead of markdown")
     rep.set_defaults(func=cmd_report)
 
     ab = sub.add_parser("ab", help="interleaved paired A/B between two endpoints")

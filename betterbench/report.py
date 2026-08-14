@@ -20,6 +20,10 @@ def _fmt(x, unit=""):
     return f"{x:.1f}{unit}" if x is not None else "—"
 
 
+def _fmt0(x, unit=""):
+    return f"{x:.0f}{unit}" if x is not None else "—"
+
+
 def _category_row(cat: str, recs: list[dict]) -> dict:
     ttft, dtps, itl, comp, pp = _collect(recs)
     ttft_d = summarize(ttft)
@@ -36,6 +40,49 @@ def _category_row(cat: str, recs: list[dict]) -> dict:
         "itl_low1": rate_d.low_1pct, "itl_med": rate_d.median, "itl_high99": rate_d.p99,
         "decode_med": dtps_d.median, "decode_iqr": dtps_d.iqr, "decode_cv": dtps_d.cv,
     }
+
+
+def single_rows(results: dict) -> list[dict]:
+    """Per-category single-stream rows. Shared by the markdown and HTML reports."""
+    return [_category_row(c, r) for c, r in results.get("single_stream", {}).items()]
+
+
+def concurrency_rows(results: dict) -> list[dict]:
+    """Per-level concurrency rows. Shared by the markdown and HTML reports."""
+    rows = []
+    for s in results.get("concurrency", []):
+        td = summarize(s.get("ttft_ms", []))
+        dd = summarize(s.get("decode_tps", []))
+        rows.append({
+            "level": s["level"], "ok": s["ok"], "requests": s["requests"],
+            "aggregate_tps": s["aggregate_tps"],
+            "ttft_p50": td.median, "ttft_p99": td.p99, "decode_med": dd.median,
+        })
+    return rows
+
+
+def prefill_rows(results: dict) -> list[dict]:
+    """Per-depth prefill rows. Shared by the markdown and HTML reports."""
+    rows = []
+    for d in results.get("prefill", []):
+        if d.get("skipped"):
+            rows.append({"target_depth": d["target_depth"], "skipped": True})
+            continue
+        pt = summarize(d.get("prompt_tokens", []))
+        td = summarize(d.get("ttft_ms", []))
+        pp = summarize(d.get("pp_tps", []), rate_like=True)
+        rows.append({
+            "target_depth": d["target_depth"], "skipped": False,
+            "prompt_tokens_med": pt.median, "ttft_p50": td.median,
+            "pp_low1": pp.low_1pct, "pp_med": pp.median, "pp_p99": pp.p99,
+        })
+    return rows
+
+
+def combined_score(results: dict, rows: list[dict] | None = None) -> dict | None:
+    """Weighted combined single-stream score, or None if there are no rows."""
+    rows = single_rows(results) if rows is None else rows
+    return _combined(rows, results.get("config", {}).get("weights", {}))
 
 
 def render_markdown(results: dict) -> str:
@@ -56,7 +103,7 @@ def render_markdown(results: dict) -> str:
 
     single = results.get("single_stream", {})
     if single:
-        rows = [_category_row(c, r) for c, r in single.items()]
+        rows = single_rows(results)
         L.append("## Single-stream (batch = 1)\n")
         L.append("ITL columns are tokens/sec: **1% low** = slowest tokens (stutter), "
                  "**median**, **99% high** = fastest. TTFT in ms; decode = per-run tok/s.\n")
@@ -72,8 +119,8 @@ def render_markdown(results: dict) -> str:
         comb = _combined(rows, weights)
         if comb:
             L.append(f"\n**Combined (weighted {', '.join(f'{k}:{v}' for k,v in weights.items() if k in single)})** "
-                     f"— decode t/s median ≈ **{comb['decode']:.1f}**, ITL 1%-low ≈ "
-                     f"**{comb['itl_low1']:.1f} t/s**, TTFT p50 ≈ **{comb['ttft_p50']:.0f} ms**")
+                     f"— decode t/s median ≈ **{_fmt(comb['decode'])}**, ITL 1%-low ≈ "
+                     f"**{_fmt(comb['itl_low1'])} t/s**, TTFT p50 ≈ **{_fmt0(comb['ttft_p50'])} ms**")
         L.append("")
 
     sweep = results.get("concurrency", [])
@@ -81,12 +128,10 @@ def render_markdown(results: dict) -> str:
         L.append("## Concurrency sweep\n")
         L.append("| level | ok/req | aggregate t/s | TTFT p50 | TTFT p99 | per-req decode t/s (med) |")
         L.append("|--:|--:|--:|--:|--:|--:|")
-        for s in sweep:
-            td = summarize(s.get("ttft_ms", []))
-            dd = summarize(s.get("decode_tps", []))
-            L.append(f"| {s['level']} | {s['ok']}/{s['requests']} | "
-                     f"{s['aggregate_tps']:.1f} | {_fmt(td.median)} | {_fmt(td.p99)} | "
-                     f"{_fmt(dd.median)} |")
+        for c in concurrency_rows(results):
+            L.append(f"| {c['level']} | {c['ok']}/{c['requests']} | "
+                     f"{c['aggregate_tps']:.1f} | {_fmt(c['ttft_p50'])} | "
+                     f"{_fmt(c['ttft_p99'])} | {_fmt(c['decode_med'])} |")
         L.append("")
 
     prefill = results.get("prefill", [])
@@ -96,16 +141,13 @@ def render_markdown(results: dict) -> str:
                  "(tiny decode, cold prefix cache). PP t/s columns: 1% low / median / 99% high.\n")
         L.append("| target depth | prompt tokens (med) | TTFT p50 (ms) | PP t/s 1% low | PP t/s median | PP t/s 99% high |")
         L.append("|--:|--:|--:|--:|--:|--:|")
-        for d in prefill:
-            if d.get("skipped"):
+        for d in prefill_rows(results):
+            if d["skipped"]:
                 L.append(f"| {d['target_depth']} | — | — | — | _skipped_ | — |")
                 continue
-            pt = summarize(d.get("prompt_tokens", []))
-            td = summarize(d.get("ttft_ms", []))
-            pp = summarize(d.get("pp_tps", []), rate_like=True)
-            pt_med = f"{pt.median:.0f}" if pt.median is not None else "—"
-            L.append(f"| {d['target_depth']} | {pt_med} | {_fmt(td.median)} | "
-                     f"{_fmt(pp.low_1pct)} | {_fmt(pp.median)} | {_fmt(pp.p99)} |")
+            pt_med = f"{d['prompt_tokens_med']:.0f}" if d["prompt_tokens_med"] is not None else "—"
+            L.append(f"| {d['target_depth']} | {pt_med} | {_fmt(d['ttft_p50'])} | "
+                     f"{_fmt(d['pp_low1'])} | {_fmt(d['pp_med'])} | {_fmt(d['pp_p99'])} |")
         skipped = [str(d["target_depth"]) for d in prefill if d.get("skipped")]
         if skipped:
             ctx = results.get("env", {}).get("max_model_len")

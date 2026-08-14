@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-report = ["jinja2>=3.1"]     # only needed for the HTML report; markdown works without it
+report = []                  # HTML report needs no extra deps; kept so [report] still resolves
 dev = ["pytest>=8.0"]
 
 [project.scripts]

@@ -278,7 +278,7 @@ resolution claims stay honest.
 
 ## 9. Repo, packaging, community
 
-- `pyproject.toml`, installable via `uv`/`pip`; zero heavyweight deps (httpx, numpy, jinja2).
+- `pyproject.toml`, installable via `uv`/`pip`; zero heavyweight deps (httpx, numpy; the HTML report is hand-rolled, no template engine).
 - `README.md` with a 30-second quickstart and an example result table.
 - `docs/METHODOLOGY.md` (metric definitions + the sample-size rules), `docs/RESULTS_FORMAT.md`,
   `docs/CONTRIBUTING_PROMPTS.md`.

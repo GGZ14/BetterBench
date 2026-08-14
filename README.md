@@ -23,8 +23,9 @@ pip install -e .          # editable install works out of the box; needs Python 
 betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.6 \
                 --out results/radiance-27b.json
 
-# Re-render a saved result later
+# Re-render a saved result later (markdown to stdout, or a charted HTML page)
 betterbench report results/radiance-27b.json
+betterbench report results/radiance-27b.json --html
 
 # Rigorous paired A/B between two endpoints (e.g. two images on ports 8080/8081)
 betterbench ab --endpoint-a http://host:8080/v1 --endpoint-b http://host:8081/v1 \
@@ -44,6 +45,14 @@ appears per category in the single-stream table.
 
 **Concurrency sweep** — aggregate throughput and per-request TTFT/decode percentiles at
 increasing load, revealing the throughput/latency knee.
+
+**A charted HTML report** — every `run` also writes a standalone `.html` beside its
+`results.json` (same basename), so the numbers land as something you can actually read: headline
+tiles, decode throughput per category against the combined score, the ITL 1%-low → 99%-high range
+per category, the concurrency knee, TTFT p50 vs p99, and prefill throughput by depth — plus the
+full tables. One self-contained file with no network assets, so it opens offline and travels in an
+email; it needs no extra dependencies and follows the reader's light/dark theme. Skip it with
+`--no-html`, or point it somewhere else with `--html-out`.
 
 **Paired A/B** — Δ with a 95% confidence interval and a verdict that **refuses to call a
 winner inside the noise band**:
