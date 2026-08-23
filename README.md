@@ -28,7 +28,7 @@ betterbench report results/radiance-27b.json
 betterbench report results/radiance-27b.json --html
 
 # Choose how many measured passes per category (default 20), or take the 5-pass shortcut
-betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 --runs 40
+betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 --runs 10
 betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 --quick
 
 # Rigorous paired A/B between two endpoints (e.g. two images on ports 8080/8081)
