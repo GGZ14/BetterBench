@@ -20,7 +20,7 @@ pip install -e .          # editable install works out of the box; needs Python 
 
 ```bash
 # Benchmark one endpoint (single-stream + concurrency sweep) and print the report
-betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.6 \
+betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 \
                 --out results/radiance-27b.json
 
 # Re-render a saved result later (markdown to stdout, or a charted HTML page)
@@ -28,12 +28,12 @@ betterbench report results/radiance-27b.json
 betterbench report results/radiance-27b.json --html
 
 # Choose how many measured passes per category (default 20), or take the 5-pass shortcut
-betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.6 --runs 40
-betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.6 --quick
+betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 --runs 40
+betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 --quick
 
 # Rigorous paired A/B between two endpoints (e.g. two images on ports 8080/8081)
 betterbench ab --endpoint-a http://host:8080/v1 --endpoint-b http://host:8081/v1 \
-               --model Qwen3.6 --mde 1.0
+               --model Qwen3.8 --mde 1.0
 ```
 
 ## What you get
