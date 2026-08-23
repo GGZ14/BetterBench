@@ -61,7 +61,7 @@ def _header(results, cfg, env) -> str:
         _chip(_esc(env.get("model", "?")), "var(--s1)"),
         _chip(f'<code>{_esc(env.get("endpoint", "?"))}</code>'),
         _chip(f'corpus v{_esc(results.get("corpus_version", "?"))}'),
-        _chip(f'{_esc(cfg.get("runs_per_category"))} runs/cat'),
+        _chip(f'{_esc(cfg.get("runs_per_category"))} passes/cat'),
         _chip(_esc(sampling)),
         _chip(_esc(cache)),
     ]
@@ -150,7 +150,7 @@ def _tables(rows, conc, pre, env) -> str:
     if rows:
         out.append(_table(
             "Single-stream, batch = 1",
-            ["category", "runs", "TTFT p50", "TTFT p99", "PP t/s med",
+            ["category", "passes", "TTFT p50", "TTFT p99", "PP t/s med",
              "ITL 1% low", "ITL med", "ITL 99% high", "decode med", "±IQR", "CV"],
             [[_esc(r["category"].replace("_", " ")), r["runs"], _fmt(r["ttft_p50"]),
               _fmt(r["ttft_p99"]), _fmt(r["pp_med"]), _fmt(r["itl_low1"]),
@@ -233,13 +233,13 @@ def render_html(results: dict) -> str:
 
     figs = []
     if rows:
-        runs_n = rows[0]["runs"] if rows else 0
+        passes_n = rows[0]["runs"] if rows else 0
         figs.append(_figure(
             "cb-decode", "Decode throughput by category",
-            f"Median per-run decode t/s at batch = 1, {runs_n} runs per category. "
+            f"Median per-pass decode t/s at batch = 1, {passes_n} passes per category. "
             "The dashed line is the weighted combined score.",
             note="Hover a bar for its IQR and coefficient of variation — a high CV means "
-                 "the category's runs disagree, so read small differences there with care."))
+                 "the category's passes disagree, so read small differences there with care."))
         figs.append(_figure(
             "cb-itl", "Inter-token latency range by category",
             "Each bar spans the 1% low to the 99% high instantaneous token rate, with a "
@@ -611,7 +611,7 @@ if (D.cats.length) {
     tipVal: v => fmt(v, 1) + " t/s",
     extra: i => row(null, "±IQR", fmt(D.decodeIqr[i], 1)) +
                 row(null, "CV", fmt(D.cv[i], 1) + "%") +
-                row(null, "runs", D.runs[i])
+                row(null, "passes", D.runs[i])
   });
   rangeBars("cb-itl", {
     aria: "Inter-token latency range per category, 1% low to 99% high.",

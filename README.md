@@ -28,7 +28,7 @@ betterbench report results/radiance-27b.json
 betterbench report results/radiance-27b.json --html
 
 # Choose how many measured passes per category (default 20), or take the 5-pass shortcut
-betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 --runs 10
+betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 --passes 10
 betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 --quick
 
 # Rigorous paired A/B between two endpoints (e.g. two images on ports 8080/8081)
@@ -47,11 +47,11 @@ increasing input depth (2K → 64K), with a cold prefix cache and tiny decode, s
 prompt processing scales for long-context / RAG / big-file workloads. A `PP t/s` column also
 appears per category in the single-stream table.
 
-**Run length you control** — `--runs N` sets the measured passes per category (default 20)
+**Run length you control** — `--passes N` sets the measured passes per category (default 20)
 and `--warmup N` the discarded ones; both override whatever a `--config` file says. `--quick`
 is the shorthand for a smoke run — 5 passes after 1 warmup — for checking that an endpoint,
 model name and corpus are wired up before you spend an hour on the real thing. Five passes
-is too thin a sample to publish or to compare stacks with; the run count is printed in the
+is too thin a sample to publish or to compare stacks with; the pass count is printed in the
 banner and recorded in the report so a quick result can't be mistaken for a full one.
 
 **Concurrency sweep** — aggregate throughput and per-request TTFT/decode percentiles at

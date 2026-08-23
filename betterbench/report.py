@@ -94,7 +94,7 @@ def render_markdown(results: dict) -> str:
              f"`{fp.get('model','?')}`  ·  **host**: {fp.get('host','?')}")
     L.append(f"- **corpus**: v{results.get('corpus_version','?')}  ·  "
              f"**sampling**: {'greedy' if cfg.get('greedy') else 'temp '+str(cfg.get('temperature'))}"
-             f"  ·  **runs/cat**: {cfg.get('runs_per_category')}  ·  "
+             f"  ·  **passes/cat**: {cfg.get('runs_per_category')}  ·  "
              f"prefix-cache: {'cold (nonce)' if cfg.get('unique_nonce') else 'warm'}")
     gpu = fp.get("gpu", {})
     if gpu:
@@ -107,7 +107,7 @@ def render_markdown(results: dict) -> str:
         L.append("## Single-stream (batch = 1)\n")
         L.append("ITL columns are tokens/sec: **1% low** = slowest tokens (stutter), "
                  "**median**, **99% high** = fastest. TTFT in ms; decode = per-run tok/s.\n")
-        L.append("| category | runs | TTFT p50 | TTFT p99 | PP t/s (med) | ITL 1% low | ITL median | ITL 99% high | decode t/s (med) | ±IQR | CV |")
+        L.append("| category | passes | TTFT p50 | TTFT p99 | PP t/s (med) | ITL 1% low | ITL median | ITL 99% high | decode t/s (med) | ±IQR | CV |")
         L.append("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
         for r in rows:
             L.append(f"| {r['category']} | {r['runs']} | {_fmt(r['ttft_p50'])} | "

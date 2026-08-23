@@ -19,7 +19,7 @@ from .runner import concurrency_sweep, paired_ab, prefill_sweep, single_stream
 
 
 # `--quick` preset: a short smoke run, not a publishable measurement.
-QUICK_RUNS = 5
+QUICK_PASSES = 5
 QUICK_WARMUP = 1
 
 
@@ -61,15 +61,15 @@ def _emit_html(results: dict, out: str, html_out: str | None, disabled: bool) ->
 
 
 def cmd_run(args):
-    # --runs wins over the config file; --quick only fills in what wasn't asked for
-    # explicitly, so `--quick --warmup 3` keeps the 3 warmups you asked for.
-    runs, warmup = args.runs, args.warmup
+    # --passes wins over the config file; --quick only fills in what wasn't asked
+    # for explicitly, so `--quick --warmup 3` keeps the 3 warmups you asked for.
+    passes, warmup = args.passes, args.warmup
     if args.quick:
-        runs = QUICK_RUNS if runs is None else runs
+        passes = QUICK_PASSES if passes is None else passes
         warmup = QUICK_WARMUP if warmup is None else warmup
 
     cfg = _load(args.config, {
-        "runs_per_category": runs, "warmup": warmup,
+        "runs_per_category": passes, "warmup": warmup,
         "greedy": args.greedy or None, "run_concurrency": not args.no_concurrency,
         "seed": args.seed, "max_model_len": args.max_model_len,
     })
@@ -86,7 +86,7 @@ def cmd_run(args):
                  "--corpus /path/to/corpus/v1 explicitly.")
     print(f"BetterBench {__version__} · corpus v{CORPUS_VERSION} · "
           f"{sum(len(v) for v in corpus.values())} prompts in {len(corpus)} categories")
-    print(f"{cfg.warmup} warmup + {cfg.runs_per_category} measured runs per category"
+    print(f"{cfg.warmup} warmup + {cfg.runs_per_category} measured passes per category"
           f"{'  (quick mode — smoke check, not a publishable result)' if args.quick else ''}")
 
     results = {
@@ -190,16 +190,20 @@ def main(argv=None):
     r.add_argument("--model", required=True)
     r.add_argument("--config"); r.add_argument("--corpus")
     r.add_argument("--categories", nargs="*")
-    passes = r.add_mutually_exclusive_group()
-    passes.add_argument("--runs", type=_positive_int, metavar="N",
-                        help=f"measured runs per category "
-                             f"(default {Config().runs_per_category}, or the config file's value)")
-    passes.add_argument("--quick", action="store_true",
-                        help=f"short smoke run: {QUICK_RUNS} runs per category "
-                             f"after {QUICK_WARMUP} warmup — too few passes for a "
-                             f"publishable number, use it to check a setup")
+    group = r.add_mutually_exclusive_group()
+    group.add_argument("--passes", type=_positive_int, metavar="N", dest="passes",
+                       help=f"measured passes per category "
+                            f"(default {Config().runs_per_category}, or the config file's value)")
+    # --runs is the pre-0.2.2 spelling: same dest, so old command lines keep
+    # working, and SUPPRESS keeps it out of --help and the usage line.
+    group.add_argument("--runs", type=_positive_int, metavar="N", dest="passes",
+                       help=argparse.SUPPRESS)
+    group.add_argument("--quick", action="store_true",
+                       help=f"short smoke run: {QUICK_PASSES} passes per category "
+                            f"after {QUICK_WARMUP} warmup — too few passes for a "
+                            f"publishable number, use it to check a setup")
     r.add_argument("--warmup", type=_non_negative_int, metavar="N",
-                   help=f"discarded runs per category "
+                   help=f"discarded passes per category "
                         f"(default {Config().warmup}; {QUICK_WARMUP} under --quick)")
     r.add_argument("--seed", type=int)
     r.add_argument("--greedy", action="store_true", help="temperature=0 (reproducibility)")
