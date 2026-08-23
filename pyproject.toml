@@ -1,6 +1,6 @@
 [project]
 name = "betterbench"
-version = "0.1.0"
+version = "0.2.1"
 description = "A real-world, percentile-based LLM inference benchmark for any OpenAI-compatible endpoint."
 readme = "README.md"
 license = { text = "Apache-2.0" }

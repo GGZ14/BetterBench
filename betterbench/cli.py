@@ -18,6 +18,25 @@ from .report import render_ab_markdown, render_markdown
 from .runner import concurrency_sweep, paired_ab, prefill_sweep, single_stream
 
 
+# `--quick` preset: a short smoke run, not a publishable measurement.
+QUICK_RUNS = 5
+QUICK_WARMUP = 1
+
+
+def _positive_int(value: str) -> int:
+    if not value.lstrip("+").isdigit() or int(value) < 1:
+        raise argparse.ArgumentTypeError(
+            f"expected a whole number of 1 or more, got {value!r}")
+    return int(value)
+
+
+def _non_negative_int(value: str) -> int:
+    if not value.lstrip("+").isdigit():
+        raise argparse.ArgumentTypeError(
+            f"expected a whole number of 0 or more, got {value!r}")
+    return int(value)
+
+
 def _load(cfg_path, overrides: dict) -> Config:
     cfg = Config.load(cfg_path)
     for k, v in overrides.items():
@@ -42,8 +61,15 @@ def _emit_html(results: dict, out: str, html_out: str | None, disabled: bool) ->
 
 
 def cmd_run(args):
+    # --runs wins over the config file; --quick only fills in what wasn't asked for
+    # explicitly, so `--quick --warmup 3` keeps the 3 warmups you asked for.
+    runs, warmup = args.runs, args.warmup
+    if args.quick:
+        runs = QUICK_RUNS if runs is None else runs
+        warmup = QUICK_WARMUP if warmup is None else warmup
+
     cfg = _load(args.config, {
-        "runs_per_category": args.runs, "warmup": args.warmup,
+        "runs_per_category": runs, "warmup": warmup,
         "greedy": args.greedy or None, "run_concurrency": not args.no_concurrency,
         "seed": args.seed, "max_model_len": args.max_model_len,
     })
@@ -60,6 +86,8 @@ def cmd_run(args):
                  "--corpus /path/to/corpus/v1 explicitly.")
     print(f"BetterBench {__version__} · corpus v{CORPUS_VERSION} · "
           f"{sum(len(v) for v in corpus.values())} prompts in {len(corpus)} categories")
+    print(f"{cfg.warmup} warmup + {cfg.runs_per_category} measured runs per category"
+          f"{'  (quick mode — smoke check, not a publishable result)' if args.quick else ''}")
 
     results = {
         "schema": RESULTS_SCHEMA,
@@ -162,7 +190,17 @@ def main(argv=None):
     r.add_argument("--model", required=True)
     r.add_argument("--config"); r.add_argument("--corpus")
     r.add_argument("--categories", nargs="*")
-    r.add_argument("--runs", type=int); r.add_argument("--warmup", type=int)
+    passes = r.add_mutually_exclusive_group()
+    passes.add_argument("--runs", type=_positive_int, metavar="N",
+                        help=f"measured runs per category "
+                             f"(default {Config().runs_per_category}, or the config file's value)")
+    passes.add_argument("--quick", action="store_true",
+                        help=f"short smoke run: {QUICK_RUNS} runs per category "
+                             f"after {QUICK_WARMUP} warmup — too few passes for a "
+                             f"publishable number, use it to check a setup")
+    r.add_argument("--warmup", type=_non_negative_int, metavar="N",
+                   help=f"discarded runs per category "
+                        f"(default {Config().warmup}; {QUICK_WARMUP} under --quick)")
     r.add_argument("--seed", type=int)
     r.add_argument("--greedy", action="store_true", help="temperature=0 (reproducibility)")
     r.add_argument("--no-concurrency", action="store_true")
