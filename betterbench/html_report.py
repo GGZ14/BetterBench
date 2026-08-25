@@ -470,7 +470,7 @@ function frame(svg, M, iw, ih, yMin, yMax, yTitle, ticks) {
     tx.textContent = fmt(v, v < 10 ? 1 : 0); svg.appendChild(tx);
   }
   svg.appendChild(el("line", { x1: M.l, x2: M.l + iw, y1: M.t + ih, y2: M.t + ih, class: "baseline" }));
-  const ay = el("text", { x: M.l - 10, y: M.t - 5, class: "axtitle", "text-anchor": "end" });
+  const ay = el("text", { x: M.l, y: M.t - 7, class: "axtitle" });
   ay.textContent = yTitle; svg.appendChild(ay);
 }
 function xLabels(svg, labels, X, y) {
