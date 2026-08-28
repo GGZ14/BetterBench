@@ -65,11 +65,23 @@ def null_test() -> bool:
                  target_mde_pct=0.0, conf=0.99, unique_nonce=True)
     corpus = load_corpus(ROOT / "corpus" / "v1", ["reasoning", "code"])
     ab = asyncio.run(paired_ab(BASE, BASE, "mock", corpus, cfg, log=lambda *a: None))
-    d = ab["decode_tps"]
-    print(f"  null A/B: pairs={ab['pairs']}  Δ={d['pct_diff']:+.2f}%  "
-          f"CI[{d['ci_low_pct']:+.2f}%,{d['ci_high_pct']:+.2f}%]  "
-          f"significant={d['significant']}")
-    return not d["significant"]
+    ok = True
+    for key in ("decode_tps", "gap_median"):
+        d = ab[key]
+        print(f"  null A/B [{key}]: pairs={ab['pairs']}  Δ={d['pct_diff']:+.2f}%  "
+              f"CI[{d['ci_low_pct']:+.2f}%,{d['ci_high_pct']:+.2f}%]  "
+              f"significant={d['significant']}")
+        # Both rows must be null AND well-formed. The latency row went unchecked
+        # here for three releases, which is how it shipped with an inverted sign
+        # and its CI bounds printed back-to-front.
+        if d["significant"]:
+            print(f"    ! {key}: phantom win on a null comparison")
+            ok = False
+        if d["ci_low_pct"] > d["ci_high_pct"]:
+            print(f"    ! {key}: CI bounds are reversed "
+                  f"({d['ci_low_pct']:+.2f} > {d['ci_high_pct']:+.2f})")
+            ok = False
+    return ok
 
 
 def main():

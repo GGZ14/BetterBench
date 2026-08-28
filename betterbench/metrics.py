@@ -96,6 +96,7 @@ class PairedResult:
     conf: float                 # e.g. 0.95
     significant: bool           # does the CI exclude zero?
     verdict: str
+    higher_is_better: bool = True   # False for latencies: a negative Δ is a win
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -135,7 +136,7 @@ def paired_compare(
     if n < 2:
         return PairedResult(metric, n, float(a.mean() if n else 0),
                             float(b.mean() if n else 0), 0, 0, 0, 0, conf, False,
-                            "insufficient pairs")
+                            "insufficient pairs", higher_is_better)
     diff = b - a
     mean_a = float(a.mean())
     mean_diff = float(diff.mean())
@@ -154,7 +155,8 @@ def paired_compare(
         direction = "faster" if (mean_diff > 0) == higher_is_better else "slower"
         verdict = f"B is {abs(pct):.2f}% {direction} — SIGNIFICANT"
     return PairedResult(metric, n, mean_a, float(b.mean()), mean_diff, pct,
-                        float(lo_pct), float(hi_pct), conf, significant, verdict)
+                        float(lo_pct), float(hi_pct), conf, significant, verdict,
+                        higher_is_better)
 
 
 # --------------------------------------------------------------------------- #

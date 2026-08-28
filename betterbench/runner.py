@@ -80,6 +80,12 @@ async def concurrency_sweep(endpoint: str, model: str,
             "aggregate_tps": (comp / wall) if wall else 0.0,
             "ttft_ms": [r.ttft_ms for r in ok if r.ttft_ms],
             "decode_tps": [r.decode_tps for r in ok if r.decode_tps],
+            # Per-request gap series would dwarf the rest of the file at this
+            # request count; the ratio is what the report needs to know whether
+            # the level was streaming one token per update.
+            "tokens_per_update": [r.tokens_per_update for r in ok
+                                  if r.tokens_per_update],
+            "batched_runs": sum(1 for r in ok if r.chunk_token_mismatch),
         })
     return out
 
@@ -103,7 +109,8 @@ async def prefill_sweep(endpoint: str, model: str, cfg: Config, log=print,
 
     def skip_row(depth: int, reason: str) -> dict:
         return {"target_depth": depth, "skipped": True, "reason": reason,
-                "prompt_tokens": [], "ttft_ms": [], "pp_tps": []}
+                "prompt_tokens": [], "ttft_ms": [], "pp_tps": [],
+                "tokens_per_update": [], "batched_runs": 0}
 
     for depth in cfg.prefill_depths:
         need = depth + cfg.prefill_max_tokens + cfg.prefill_ctx_margin
@@ -146,6 +153,9 @@ async def prefill_sweep(endpoint: str, model: str, cfg: Config, log=print,
             "prompt_tokens": [r.prompt_tokens for r in ok if r.prompt_tokens],
             "ttft_ms": [r.ttft_ms for r in ok if r.ttft_ms],
             "pp_tps": [r.pp_tps for r in ok if r.pp_tps],
+            "tokens_per_update": [r.tokens_per_update for r in ok
+                                  if r.tokens_per_update],
+            "batched_runs": sum(1 for r in ok if r.chunk_token_mismatch),
         })
     return out
 
@@ -160,9 +170,10 @@ async def paired_ab(endpoint_a: str, endpoint_b: str, model: str,
     rng = random.Random(7)
     a_tps: list[float] = []; b_tps: list[float] = []
     a_itl: list[float] = []; b_itl: list[float] = []
+    batched = False
 
-    def med(itl):
-        return float(np.median(itl)) if itl else None
+    def med(samples):
+        return float(np.median(samples)) if samples else None
 
     async def call(ep, p, msgs):
         return await stream_chat(ep, model, msgs, max_tokens=p.max_tokens,
@@ -181,9 +192,16 @@ async def paired_ab(endpoint_a: str, endpoint_b: str, model: str,
             ra = await call(endpoint_a, p, msgs); rb = await call(endpoint_b, p, msgs)
         else:
             rb = await call(endpoint_b, p, msgs); ra = await call(endpoint_a, p, msgs)
-        if ra.ok and rb.ok and ra.decode_tps and rb.decode_tps:
+        # Median *stream-update* gap, not per-token ITL: on a speculative server
+        # itl_ms is empty by construction, and pairing on it would drop every
+        # pair (and used to raise TypeError on the None it left behind).
+        ma, mb = med(ra.update_gaps_ms), med(rb.update_gaps_ms)
+        if ra.ok and rb.ok and ra.decode_tps and rb.decode_tps \
+                and ma is not None and mb is not None:
             a_tps.append(ra.decode_tps); b_tps.append(rb.decode_tps)
-            a_itl.append(med(ra.itl_ms)); b_itl.append(med(rb.itl_ms))
+            a_itl.append(ma); b_itl.append(mb)
+            if ra.chunking == "batched" or rb.chunking == "batched":
+                batched = True
         if len(a_tps) >= cfg.ab_min_pairs:
             hw = paired_ci_halfwidth_pct(a_tps, b_tps, cfg.conf)
             if hw <= cfg.target_mde_pct:
@@ -192,14 +210,16 @@ async def paired_ab(endpoint_a: str, endpoint_b: str, model: str,
                 break
 
     tps = paired_compare(a_tps, b_tps, "decode_tps", cfg.conf, higher_is_better=True)
-    itl = paired_compare([-x for x in a_itl], [-x for x in b_itl],
-                         "itl_median_ms", cfg.conf, higher_is_better=True)
+    gap_metric = "update_gap_median_ms" if batched else "itl_median_ms"
+    itl = paired_compare(a_itl, b_itl, gap_metric, cfg.conf,
+                         higher_is_better=False)
     paired_cv = (float(np.std(np.array(b_tps) - np.array(a_tps), ddof=1) / np.mean(a_tps))
                  if len(a_tps) > 1 else 0.0)
     return {
         "endpoint_a": endpoint_a, "endpoint_b": endpoint_b, "model": model,
         "pairs": len(a_tps), "decode_tps": tps.as_dict(),
-        "itl_median": {**itl.as_dict(), "note": "sign flipped: latency, lower=better"},
+        "gap_median": {**itl.as_dict(), "batched": batched},
+        "conf": cfg.conf, "target_mde_pct": cfg.target_mde_pct,
         "paired_cv": paired_cv,
         "pairs_needed_for_mde": required_pairs_for_mde(paired_cv, cfg.target_mde_pct, cfg.conf),
         "raw": {"a_tps": a_tps, "b_tps": b_tps, "a_itl": a_itl, "b_itl": b_itl},

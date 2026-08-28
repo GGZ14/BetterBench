@@ -3,17 +3,68 @@ from __future__ import annotations
 
 import numpy as np
 
+from .client import classify_chunking
 from .metrics import (Dist, enough_samples_for_percentile, itl_to_rate_samples,
                       summarize)
 
 
+def run_gaps_ms(r: dict) -> list[float]:
+    """Wall-clock gaps between stream updates for one run.
+
+    Schema 2 records them directly. Schema 1 stored `itl_ms`, which was the same
+    gaps multiplied by a single per-run scalar `n_chunks / completion_tokens` —
+    so the measured series is exactly recoverable, and old results re-render
+    under the honest columns instead of being refused.
+    """
+    gaps = r.get("update_gaps_ms")
+    if gaps is not None:
+        return gaps
+    itl = r.get("itl_ms") or []
+    comp, n = r.get("completion_tokens"), r.get("n_chunks")
+    if itl and comp and n:
+        return [x * comp / n for x in itl]
+    return list(itl)
+
+
+def run_tokens_per_update(r: dict) -> float | None:
+    tpu = r.get("tokens_per_update")
+    if tpu:
+        return tpu
+    comp, n = r.get("completion_tokens"), r.get("n_chunks")
+    return (comp / n) if comp and n else None
+
+
+def run_chunking(r: dict) -> str:
+    """"per_token" | "batched" | "unknown" for one run.
+
+    Re-derived from the recorded counts rather than trusting the stored
+    `chunk_token_mismatch`, so a schema-1 file written under the old 10%
+    tolerance is judged by exactly the same rule as a fresh one. The stored flag
+    is only a fallback for a record that has no usage counts at all.
+    """
+    comp, n = r.get("completion_tokens"), r.get("n_chunks")
+    if comp and n:
+        return classify_chunking(comp, n)[0]
+    if r.get("chunk_token_mismatch"):
+        return "batched"
+    return "unknown"
+
+
+def run_is_batched(r: dict) -> bool:
+    """Did this run pack several tokens into one stream update?"""
+    return run_chunking(r) == "batched"
+
+
 def _collect(recs: list[dict]):
-    ttft = [r["ttft_ms"] for r in recs if r.get("ok") and r.get("ttft_ms")]
-    dtps = [r["decode_tps"] for r in recs if r.get("ok") and r.get("decode_tps")]
-    itl = [x for r in recs if r.get("ok") for x in (r.get("itl_ms") or [])]
-    comp = [r.get("completion_tokens") or 0 for r in recs if r.get("ok")]
-    pp = [r["pp_tps"] for r in recs if r.get("ok") and r.get("pp_tps")]
-    return ttft, dtps, itl, comp, pp
+    ok = [r for r in recs if r.get("ok")]
+    ttft = [r["ttft_ms"] for r in ok if r.get("ttft_ms")]
+    dtps = [r["decode_tps"] for r in ok if r.get("decode_tps")]
+    gaps = [x for r in ok for x in run_gaps_ms(r)]
+    comp = [r.get("completion_tokens") or 0 for r in ok]
+    chunks = [r.get("n_chunks") or 0 for r in ok]
+    pp = [r["pp_tps"] for r in ok if r.get("pp_tps")]
+    batched = sum(1 for r in ok if run_is_batched(r))
+    return ttft, dtps, gaps, comp, chunks, pp, batched
 
 
 def _fmt(x, unit=""):
@@ -24,22 +75,47 @@ def _fmt0(x, unit=""):
     return f"{x:.0f}{unit}" if x is not None else "—"
 
 
+def _fmt2(x, unit=""):
+    return f"{x:.2f}{unit}" if x is not None else "—"
+
+
 def _category_row(cat: str, recs: list[dict]) -> dict:
-    ttft, dtps, itl, comp, pp = _collect(recs)
+    ttft, dtps, gaps, comp, chunks, pp, batched = _collect(recs)
     ttft_d = summarize(ttft)
     dtps_d = summarize(dtps)
-    rate = itl_to_rate_samples(itl)               # instantaneous tok/s per token
-    rate_d = summarize(rate, rate_like=True)
+    gap_d = summarize(gaps)
     pp_d = summarize(pp)
-    return {
+    n_ok = len([r for r in recs if r.get("ok")])
+    tot_chunks = int(np.sum(chunks)) if chunks else 0
+    row = {
         "category": cat,
-        "runs": len([r for r in recs if r.get("ok")]),
+        "runs": n_ok,
         "tokens": int(np.sum(comp)) if comp else 0,
         "ttft_p50": ttft_d.median, "ttft_p99": ttft_d.p99,
         "pp_med": pp_d.median,
-        "itl_low1": rate_d.low_1pct, "itl_med": rate_d.median, "itl_high99": rate_d.p99,
+        # Measured, always present: the wall-clock gap between stream updates.
+        "update_p50": gap_d.median if gaps else None,
+        "update_p99": gap_d.p99 if gaps else None,
+        "tok_per_update": (float(np.sum(comp)) / tot_chunks) if tot_chunks else None,
+        "batched_runs": batched,
+        "batched": batched > 0,
         "decode_med": dtps_d.median, "decode_iqr": dtps_d.iqr, "decode_cv": dtps_d.cv,
     }
+    # Per-token ITL exists only when the server streams one token per chunk.
+    # When several tokens land in one update they arrived together, so there is
+    # no "time between" them to report — and inventing one wrecks both tails.
+    if batched or not gaps:
+        row.update(itl_low1=None, itl_med=None, itl_high99=None)
+    else:
+        rate_d = summarize(itl_to_rate_samples(gaps), rate_like=True)
+        row.update(itl_low1=rate_d.low_1pct, itl_med=rate_d.median,
+                   itl_high99=rate_d.p99)
+    return row
+
+
+def report_is_batched(rows: list[dict]) -> bool:
+    """Does this report need the stream-update columns instead of ITL?"""
+    return any(r.get("batched") for r in rows)
 
 
 def single_rows(results: dict) -> list[dict]:
@@ -104,23 +180,50 @@ def render_markdown(results: dict) -> str:
     single = results.get("single_stream", {})
     if single:
         rows = single_rows(results)
+        batched = report_is_batched(rows)
         L.append("## Single-stream (batch = 1)\n")
-        L.append("ITL columns are tokens/sec: **1% low** = slowest tokens (stutter), "
-                 "**median**, **99% high** = fastest. TTFT in ms; decode = per-run tok/s.\n")
-        L.append("| category | passes | TTFT p50 | TTFT p99 | PP t/s (med) | ITL 1% low | ITL median | ITL 99% high | decode t/s (med) | ±IQR | CV |")
-        L.append("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
-        for r in rows:
-            L.append(f"| {r['category']} | {r['runs']} | {_fmt(r['ttft_p50'])} | "
-                     f"{_fmt(r['ttft_p99'])} | {_fmt(r.get('pp_med'))} | {_fmt(r['itl_low1'])} | {_fmt(r['itl_med'])} | "
-                     f"{_fmt(r['itl_high99'])} | {_fmt(r['decode_med'])} | "
-                     f"{_fmt(r['decode_iqr'])} | {r['decode_cv']*100:.1f}% |")
+        if batched:
+            L.append("This server packs several tokens into one stream update "
+                     "(speculative decoding), so there is no per-token latency to "
+                     "report — the tokens in an update arrive together. **update "
+                     "p50/p99** is the measured wall-clock gap between updates "
+                     "(p99 is the stutter); **tok/update** is how many tokens land "
+                     "per update. TTFT in ms; decode = per-run tok/s.\n")
+            L.append("| category | passes | TTFT p50 | TTFT p99 | PP t/s (med) | update p50 (ms) | update p99 (ms) | tok/update | decode t/s (med) | ±IQR | CV |")
+            L.append("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
+            for r in rows:
+                L.append(f"| {r['category']} | {r['runs']} | {_fmt(r['ttft_p50'])} | "
+                         f"{_fmt(r['ttft_p99'])} | {_fmt(r.get('pp_med'))} | "
+                         f"{_fmt(r['update_p50'])} | {_fmt(r['update_p99'])} | "
+                         f"{_fmt2(r['tok_per_update'])} | {_fmt(r['decode_med'])} | "
+                         f"{_fmt(r['decode_iqr'])} | {r['decode_cv']*100:.1f}% |")
+        else:
+            L.append("ITL columns are tokens/sec: **1% low** = slowest tokens (stutter), "
+                     "**median**, **99% high** = fastest. This server streams one token "
+                     "per update, so the update gap *is* the inter-token latency. "
+                     "TTFT in ms; decode = per-run tok/s.\n")
+            L.append("| category | passes | TTFT p50 | TTFT p99 | PP t/s (med) | ITL 1% low | ITL median | ITL 99% high | decode t/s (med) | ±IQR | CV |")
+            L.append("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
+            for r in rows:
+                L.append(f"| {r['category']} | {r['runs']} | {_fmt(r['ttft_p50'])} | "
+                         f"{_fmt(r['ttft_p99'])} | {_fmt(r.get('pp_med'))} | {_fmt(r['itl_low1'])} | {_fmt(r['itl_med'])} | "
+                         f"{_fmt(r['itl_high99'])} | {_fmt(r['decode_med'])} | "
+                         f"{_fmt(r['decode_iqr'])} | {r['decode_cv']*100:.1f}% |")
         # combined weighted
         weights = cfg.get("weights", {})
         comb = _combined(rows, weights)
         if comb:
+            lead = (f"update p99 ≈ **{_fmt(comb['update_p99'])} ms**" if batched
+                    else f"ITL 1%-low ≈ **{_fmt(comb['itl_low1'])} t/s**")
             L.append(f"\n**Combined (weighted {', '.join(f'{k}:{v}' for k,v in weights.items() if k in single)})** "
-                     f"— decode t/s median ≈ **{_fmt(comb['decode'])}**, ITL 1%-low ≈ "
-                     f"**{_fmt(comb['itl_low1'])} t/s**, TTFT p50 ≈ **{_fmt0(comb['ttft_p50'])} ms**")
+                     f"— decode t/s median ≈ **{_fmt(comb['decode'])}**, {lead}, "
+                     f"TTFT p50 ≈ **{_fmt0(comb['ttft_p50'])} ms**")
+        n_batched = sum(r["batched_runs"] for r in rows)
+        n_runs = sum(r["runs"] for r in rows)
+        if n_batched:
+            L.append(f"\n*{n_batched} of {n_runs} runs streamed several tokens per "
+                     f"update (`chunk_token_mismatch`). Per-token ITL is not reported "
+                     f"for them — see METHODOLOGY.md §chunk-token.*")
         L.append("")
 
     sweep = results.get("concurrency", [])
@@ -177,6 +280,7 @@ def _combined(rows, weights):
         s = sum(wt for wt, _ in vals)
         return sum(wt * v for wt, v in vals) / s if s else None
     return {"decode": wavg("decode_med"), "itl_low1": wavg("itl_low1"),
+            "update_p50": wavg("update_p50"), "update_p99": wavg("update_p99"),
             "ttft_p50": wavg("ttft_p50")}
 
 
@@ -184,13 +288,20 @@ def render_ab_markdown(ab: dict) -> str:
     L = ["# BetterBench — paired A/B\n"]
     L.append(f"- **A**: `{ab['endpoint_a']}`  vs  **B**: `{ab['endpoint_b']}`  ·  "
              f"model `{ab['model']}`  ·  **{ab['pairs']}** interleaved pairs")
+    mde = ab.get("target_mde_pct", 1.0)
     L.append(f"- paired CV of decode diff: {ab['paired_cv']*100:.2f}%  ·  "
-             f"pairs needed for {1.0}% MDE: ~{ab['pairs_needed_for_mde']}\n")
-    for key, label in (("decode_tps", "Decode throughput (B vs A)"),
-                       ("itl_median", "ITL median smoothness (B vs A)")):
-        d = ab[key]
+             f"pairs needed for {mde}% MDE: ~{ab['pairs_needed_for_mde']}\n")
+    gap = ab.get("gap_median") or ab.get("itl_median") or {}
+    gap_label = ("Stream-update gap, median (B vs A)" if gap.get("batched")
+                 else "ITL median smoothness (B vs A)")
+    for key, label, d in (("decode_tps", "Decode throughput (B vs A)", ab["decode_tps"]),
+                          ("gap_median", gap_label, gap)):
+        if not d:
+            continue
+        conf = int(round(d.get("conf", 0.95) * 100))
         L.append(f"### {label}")
-        L.append(f"- Δ = **{d['pct_diff']:+.2f}%**  (95% CI [{d['ci_low_pct']:+.2f}%, "
-                 f"{d['ci_high_pct']:+.2f}%])")
+        direction = "" if d.get("higher_is_better", True) else "  ·  lower is better"
+        L.append(f"- Δ = **{d['pct_diff']:+.2f}%**  ({conf}% CI [{d['ci_low_pct']:+.2f}%, "
+                 f"{d['ci_high_pct']:+.2f}%]){direction}")
         L.append(f"- **{d['verdict']}**\n")
     return "\n".join(L)

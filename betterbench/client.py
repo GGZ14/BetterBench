@@ -5,10 +5,21 @@ is provided by wrapping the blocking request in asyncio.to_thread, which gives
 real parallelism for I/O-bound token streaming.
 
 Captures, per request:
-  * TTFT   — time from send to the first content-bearing chunk (ms)
-  * ITL    — per-token inter-token latency (ms), reconciled against usage
+  * TTFT             — time from send to the first content-bearing chunk (ms)
+  * update gaps      — wall-clock gaps between stream updates (ms), as measured
+  * ITL              — per-token latency (ms), only when the server streams one
+                       token per chunk; otherwise there is nothing to report
   * decode / total tokens-per-second
   * prompt / completion token counts (reasoning tokens included)
+
+A note on ITL and speculative decoding. Most servers stream one token per SSE
+chunk, and then the gap between chunks *is* the inter-token latency. Servers
+doing speculative decoding (MTP, EAGLE, Medusa, n-gram, ...) verify several
+tokens in a single forward pass and write all the accepted ones into one chunk.
+Those tokens did not arrive at different times — they arrived together, in the
+same network write — so for tokens inside a chunk "time between tokens" has no
+answer. BetterBench does not invent one: it reports the measured update gap and
+the tokens per update instead, and leaves `itl_ms` empty.
 """
 from __future__ import annotations
 
@@ -21,13 +32,49 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+# How far usage.completion_tokens may exceed the chunk count before we stop
+# calling a stream one-token-per-chunk. Both a ratio and an absolute slack:
+# `usage` counts tokens that never carried a delta (EOS, and on some servers a
+# role-only opening chunk), so a genuinely 1:1 stream lands one or two tokens
+# above its chunk count regardless of length — 15 of 40 records in a real
+# non-speculative reference run are exactly comp == n_chunks + 1. A ratio alone
+# would pass that on a 900-token generation and fail it on a 16-token prefill
+# probe. The ratio is deliberately tight: whatever it admits is the worst-case
+# error in any per-token latency we then report, so the 10% BetterBench used
+# through 0.2.3 was ten times too loose.
+CHUNK_TOKEN_TOL = 0.02
+CHUNK_TOKEN_SLACK = 2
+
+
+def classify_chunking(completion_tokens: int | None,
+                     n_chunks: int) -> tuple[str, float | None]:
+    """Did the server stream one token per update, or several?
+
+    Returns (chunking, tokens_per_update) where chunking is one of
+    "per_token", "batched" or "unknown". "unknown" means we have no trustworthy
+    token count to divide by — we do not guess 1:1, because assuming a ratio we
+    cannot see is the same mistake as scaling by one.
+    """
+    if not completion_tokens or n_chunks <= 1:
+        return "unknown", None
+    tpu = completion_tokens / n_chunks
+    if tpu < 0.90:                # fewer tokens than chunks: usage is unreliable
+        return "unknown", tpu
+    if (completion_tokens - n_chunks) <= max(CHUNK_TOKEN_SLACK,
+                                             CHUNK_TOKEN_TOL * n_chunks):
+        return "per_token", tpu
+    return "batched", tpu
+
+
 @dataclass
 class RunResult:
     ok: bool
     category: str = ""
     prompt_id: str = ""
     ttft_ms: float | None = None
-    itl_ms: list[float] = field(default_factory=list)   # per-token (reconciled)
+    update_gaps_ms: list[float] = field(default_factory=list)  # measured, per chunk
+    tokens_per_update: float | None = None              # completion_tokens / n_chunks
+    chunking: str = "unknown"                           # per_token | batched | unknown
     decode_tps: float | None = None
     total_tps: float | None = None
     pp_tps: float | None = None                          # prompt-processing (prefill) t/s
@@ -38,6 +85,18 @@ class RunResult:
     finish_reason: str | None = None
     wall_ms: float | None = None
     error: str | None = None
+
+    @property
+    def itl_ms(self) -> list[float]:
+        """Per-token inter-token latency, in ms.
+
+        Only meaningful when the server streams one token per update, in which
+        case the update gap *is* the inter-token latency. Empty otherwise —
+        never synthesised by scaling a batched gap down. Being a property, it
+        also stays out of `as_dict()`, so results.json carries the measured
+        series once rather than twice.
+        """
+        return self.update_gaps_ms if self.chunking == "per_token" else []
 
     def as_dict(self) -> dict:
         return dict(self.__dict__)
@@ -70,14 +129,14 @@ def _finalize(res: RunResult, chunk_times: list[float], t0: float, t_end: float,
     # the standard prefill-throughput approximation.
     if res.prompt_tokens and res.ttft_ms and res.ttft_ms > 0:
         res.pp_tps = res.prompt_tokens / (res.ttft_ms / 1000.0)
-    gaps = [(chunk_times[i] - chunk_times[i - 1]) * 1000.0
-            for i in range(1, len(chunk_times))]
+    # The measured series: wall-clock time between stream updates. Never derived.
+    res.update_gaps_ms = [(chunk_times[i] - chunk_times[i - 1]) * 1000.0
+                          for i in range(1, len(chunk_times))]
 
     comp = res.completion_tokens or res.n_chunks
-    if comp and abs(comp - res.n_chunks) / max(comp, 1) > 0.10:
-        res.chunk_token_mismatch = True
-    scale = (res.n_chunks / comp) if comp else 1.0   # per-chunk gap -> per-token
-    res.itl_ms = [g * scale for g in gaps]
+    res.chunking, res.tokens_per_update = classify_chunking(res.completion_tokens,
+                                                            res.n_chunks)
+    res.chunk_token_mismatch = (res.chunking == "batched")   # kept for old readers
 
     decode_wall = chunk_times[-1] - chunk_times[0]
     if decode_wall > 0 and comp > 1:

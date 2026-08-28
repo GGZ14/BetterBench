@@ -16,6 +16,7 @@ from datetime import datetime
 
 from . import __version__
 from .report import (combined_score, concurrency_rows, prefill_rows,
+                     report_is_batched,
                      single_rows)
 
 
@@ -89,13 +90,17 @@ def _tile(label, value, unit, sub):
       </div>"""
 
 
-def _tiles(comb, conc, pre, cfg) -> str:
+def _tiles(comb, conc, pre, cfg, batched=False) -> str:
     t = []
     if comb:
         t.append(_tile("Combined decode", _fmt(comb["decode"]), "t/s",
                        "weighted across categories"))
-        t.append(_tile("Combined ITL 1% low", _fmt(comb["itl_low1"]), "t/s",
-                       "the trustworthy tail metric"))
+        if batched:
+            t.append(_tile("Combined update p99", _fmt(comb["update_p99"]), "ms",
+                           "the stutter between stream updates"))
+        else:
+            t.append(_tile("Combined ITL 1% low", _fmt(comb["itl_low1"]), "t/s",
+                           "the trustworthy tail metric"))
         t.append(_tile("Combined TTFT p50", _fmt(comb["ttft_p50"], 0), "ms",
                        "single-stream, batch = 1"))
     if conc:
@@ -145,9 +150,21 @@ def _table(caption, headers, body_rows) -> str:
       </table>"""
 
 
-def _tables(rows, conc, pre, env) -> str:
+def _tables(rows, conc, pre, env, batched=False) -> str:
     out = []
-    if rows:
+    if rows and batched:
+        out.append(_table(
+            "Single-stream, batch = 1 · several tokens per stream update",
+            ["category", "passes", "TTFT p50", "TTFT p99", "PP t/s med",
+             "update p50 (ms)", "update p99 (ms)", "tok/update", "decode med",
+             "±IQR", "CV"],
+            [[_esc(r["category"].replace("_", " ")), r["runs"], _fmt(r["ttft_p50"]),
+              _fmt(r["ttft_p99"]), _fmt(r["pp_med"]), _fmt(r["update_p50"]),
+              _fmt(r["update_p99"]), _fmt(r["tok_per_update"], 2),
+              _fmt(r["decode_med"]), _fmt(r["decode_iqr"]),
+              _fmt((r["decode_cv"] or 0) * 100, 1, "%")]
+             for r in rows]))
+    elif rows:
         out.append(_table(
             "Single-stream, batch = 1",
             ["category", "passes", "TTFT p50", "TTFT p99", "PP t/s med",
@@ -197,6 +214,7 @@ def render_html(results: dict) -> str:
     conc = concurrency_rows(results)
     pre = prefill_rows(results)
     comb = combined_score(results, rows)
+    batched = report_is_batched(rows)
 
     live_pre = [p for p in pre if not p["skipped"]]
     skipped = [int(p["target_depth"]) for p in pre if p["skipped"]]
@@ -210,6 +228,10 @@ def render_html(results: dict) -> str:
         "itlLow": [_num(r["itl_low1"]) for r in rows],
         "itlMed": [_num(r["itl_med"]) for r in rows],
         "itlHigh": [_num(r["itl_high99"]) for r in rows],
+        "batched": batched,
+        "updP50": [_num(r["update_p50"]) for r in rows],
+        "updP99": [_num(r["update_p99"]) for r in rows],
+        "tokPerUpd": [_num(r["tok_per_update"]) for r in rows],
         "ttft50": [_num(r["ttft_p50"]) for r in rows],
         "combined": _num(comb["decode"]) if comb else None,
         "conc": {
@@ -240,11 +262,22 @@ def render_html(results: dict) -> str:
             "The dashed line is the weighted combined score.",
             note="Hover a bar for its IQR and coefficient of variation — a high CV means "
                  "the category's passes disagree, so read small differences there with care."))
-        figs.append(_figure(
-            "cb-itl", "Inter-token latency range by category",
-            "Each bar spans the 1% low to the 99% high instantaneous token rate, with a "
-            "tick at the median. Wide bars stutter; narrow bars feel smooth.",
-            legend=[("1% low → 99% high", "var(--s1-mid)"), ("median", "var(--ink)")]))
+        if batched:
+            figs.append(_figure(
+                "cb-itl", "Stream-update gap by category",
+                "This server packs several tokens into one stream update, so there is no "
+                "per-token latency to plot. These are the measured wall-clock gaps between "
+                "updates: p50 is the typical rhythm, p99 the stutter. Lower is better.",
+                legend=[("update p50", "var(--s1)"), ("update p99", "var(--s2)")],
+                note="Hover a bar for the tokens landing per update. p99 is an upper bound "
+                     "on any pause a reader feels; it is not comparable across servers that "
+                     "pack different numbers of tokens into an update."))
+        else:
+            figs.append(_figure(
+                "cb-itl", "Inter-token latency range by category",
+                "Each bar spans the 1% low to the 99% high instantaneous token rate, with a "
+                "tick at the median. Wide bars stutter; narrow bars feel smooth.",
+                legend=[("1% low → 99% high", "var(--s1-mid)"), ("median", "var(--ink)")]))
     if conc and len(data["conc"]["levels"]) > 1:
         figs.append(_figure(
             "cb-conc", "Aggregate throughput under concurrency",
@@ -271,9 +304,9 @@ def render_html(results: dict) -> str:
     page = _TEMPLATE
     page = page.replace("__TITLE__", _esc(f'BetterBench — {env.get("model", "run")}'))
     page = page.replace("__HEADER__", _header(results, cfg, env))
-    page = page.replace("__TILES__", _tiles(comb, conc, pre, cfg))
+    page = page.replace("__TILES__", _tiles(comb, conc, pre, cfg, batched))
     page = page.replace("__FIGURES__", "\n".join(figs))
-    page = page.replace("__TABLES__", _tables(rows, conc, pre, env))
+    page = page.replace("__TABLES__", _tables(rows, conc, pre, env, batched))
     page = page.replace("__FOOTER__", _footer(results, env, cfg))
     page = page.replace("__DATA__", json.dumps(data))
     return page
@@ -613,15 +646,31 @@ if (D.cats.length) {
                 row(null, "CV", fmt(D.cv[i], 1) + "%") +
                 row(null, "passes", D.runs[i])
   });
-  rangeBars("cb-itl", {
-    aria: "Inter-token latency range per category, 1% low to 99% high.",
-    x: D.cats, yTitle: "INSTANTANEOUS T/S",
-    yMax: niceTop(maxOf([D.itlHigh])),
-    low: D.itlLow, med: D.itlMed, high: D.itlHigh,
-    tipVal: v => fmt(v, 1) + " t/s",
-    extra: i => row(null, "spread", has(D.itlHigh[i]) && has(D.itlLow[i])
-      ? fmt(D.itlHigh[i] - D.itlLow[i], 1) + " t/s" : "—")
-  });
+  if (D.batched) {
+    /* Grouped bars, not a floating range bar: p50 and p99 can differ by two
+       orders of magnitude (a 17 ms rhythm against a 1.3 s stall), and a bar
+       floating between them collapses the p50 end onto the axis. */
+    bars("cb-itl", {
+      aria: "Stream-update gap p50 and p99 by category.",
+      x: D.cats, yTitle: "UPDATE GAP (MS)",
+      yMax: niceTop(maxOf([D.updP99, D.updP50])), height: 320,
+      series: [{ name: "p50", color: "var(--s1)", v: D.updP50 },
+               { name: "p99", color: "var(--s2)", v: D.updP99 }],
+      tipVal: v => fmt(v, 1) + " ms",
+      extra: i => row(null, "tok/update", fmt(D.tokPerUpd[i], 2)) +
+                  row(null, "passes", D.runs[i])
+    });
+  } else {
+    rangeBars("cb-itl", {
+      aria: "Inter-token latency range per category, 1% low to 99% high.",
+      x: D.cats, yTitle: "INSTANTANEOUS T/S",
+      yMax: niceTop(maxOf([D.itlHigh])),
+      low: D.itlLow, med: D.itlMed, high: D.itlHigh,
+      tipVal: v => fmt(v, 1) + " t/s",
+      extra: i => row(null, "spread", has(D.itlHigh[i]) && has(D.itlLow[i])
+        ? fmt(D.itlHigh[i] - D.itlLow[i], 1) + " t/s" : "—")
+    });
+  }
 }
 if (D.conc.levels.length > 1) {
   line("cb-conc", {

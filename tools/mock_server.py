@@ -15,7 +15,28 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-def make_handler(ttft_ms: float, itl_ms: float, tokens: int, max_ctx: int = 0):
+def make_handler(ttft_ms: float, itl_ms: float, tokens: int, max_ctx: int = 0, *,
+                 tokens_per_chunk: int = 1, stall_every: int = 0,
+                 stall_ms: float = 0.0, usage_extra_tokens: int = 0,
+                 no_usage: bool = False, reasoning: str = "off",
+                 reasoning_tokens: int = 0, finish_reason: str = "stop"):
+    """Build the request handler.
+
+    Beyond the fixed-timing defaults (one token per chunk, which is what the
+    self-test's timing gate measures), the keyword knobs let a test reproduce
+    the stream shapes real servers produce:
+
+      tokens_per_chunk    pack N tokens into each SSE delta, as speculative
+                          decoding does — the shape that has no per-token ITL
+      stall_every/_ms     inject a known long gap, so a tail assertion has a
+                          ground truth
+      usage_extra_tokens  report more completion_tokens than deltas sent (EOS),
+                          the off-by-one that a strict 1:1 test misreads
+      no_usage            omit the usage chunk entirely
+      reasoning           "channel" (reasoning_content deltas) or "inline"
+                          (a literal <think>...</think> inside content)
+      finish_reason       force "length" for the truncated-mid-thought path
+    """
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -73,13 +94,41 @@ def make_handler(ttft_ms: float, itl_ms: float, tokens: int, max_ctx: int = 0):
                 self.wfile.flush()
 
             time.sleep(ttft_ms / 1000.0)
-            for i in range(n):
-                sse({"choices": [{"delta": {"content": "x "}, "finish_reason": None}]})
-                if i < n - 1:
-                    time.sleep(itl_ms / 1000.0)
-            sse({"choices": [{"delta": {}, "finish_reason": "stop"}],
-                 "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": n,
-                           "total_tokens": prompt_tokens + n}})
+            per = max(1, tokens_per_chunk)
+            n_think = min(reasoning_tokens, n) if reasoning != "off" else 0
+            emitted = 0
+            chunk_i = 0
+            opened = False
+            while emitted < n:
+                k = min(per, n - emitted)
+                # Which channel do the tokens in this update belong to?
+                in_think = emitted < n_think
+                text = "x " * k
+                if reasoning == "channel" and in_think:
+                    delta = {"reasoning_content": text}
+                elif reasoning == "inline":
+                    if in_think and not opened:
+                        text, opened = "<think>" + text, True
+                    elif not in_think and opened:
+                        text, opened = "</think>" + text, False
+                    delta = {"content": text}
+                else:
+                    delta = {"content": text}
+                sse({"choices": [{"delta": delta, "finish_reason": None}]})
+                emitted += k
+                chunk_i += 1
+                if emitted < n:
+                    gap = itl_ms * k
+                    if stall_every and chunk_i % stall_every == 0:
+                        gap += stall_ms
+                    time.sleep(gap / 1000.0)
+            last = {"choices": [{"delta": {}, "finish_reason": finish_reason}]}
+            if not no_usage:
+                comp = n + usage_extra_tokens
+                last["usage"] = {"prompt_tokens": prompt_tokens,
+                                 "completion_tokens": comp,
+                                 "total_tokens": prompt_tokens + comp}
+            sse(last)
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
             self.close_connection = True
@@ -93,9 +142,26 @@ def main():
     ap.add_argument("--ttft-ms", type=float, default=40.0)
     ap.add_argument("--itl-ms", type=float, default=10.0)
     ap.add_argument("--tokens", type=int, default=120)
+    ap.add_argument("--tokens-per-chunk", type=int, default=1,
+                    help="pack N tokens into each SSE update (speculative decoding)")
+    ap.add_argument("--stall-every", type=int, default=0)
+    ap.add_argument("--stall-ms", type=float, default=0.0)
+    ap.add_argument("--usage-extra-tokens", type=int, default=0)
+    ap.add_argument("--no-usage", action="store_true")
+    ap.add_argument("--reasoning", choices=["off", "channel", "inline"], default="off")
+    ap.add_argument("--reasoning-tokens", type=int, default=0)
+    ap.add_argument("--finish-reason", default="stop")
     a = ap.parse_args()
     srv = ThreadingHTTPServer(("127.0.0.1", a.port),
-                              make_handler(a.ttft_ms, a.itl_ms, a.tokens))
+                              make_handler(a.ttft_ms, a.itl_ms, a.tokens,
+                                           tokens_per_chunk=a.tokens_per_chunk,
+                                           stall_every=a.stall_every,
+                                           stall_ms=a.stall_ms,
+                                           usage_extra_tokens=a.usage_extra_tokens,
+                                           no_usage=a.no_usage,
+                                           reasoning=a.reasoning,
+                                           reasoning_tokens=a.reasoning_tokens,
+                                           finish_reason=a.finish_reason))
     print(f"mock server on http://127.0.0.1:{a.port}  ttft={a.ttft_ms}ms itl={a.itl_ms}ms")
     srv.serve_forever()
 
