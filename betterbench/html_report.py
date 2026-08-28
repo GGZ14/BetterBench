@@ -16,8 +16,7 @@ from datetime import datetime
 
 from . import __version__
 from .report import (combined_score, concurrency_rows, prefill_rows,
-                     report_is_batched,
-                     single_rows)
+                     report_is_batched, sample_gate, single_rows)
 
 
 def _num(x):
@@ -38,6 +37,15 @@ def _esc(x) -> str:
 def _fmt(x, d=1, unit="", dash="—"):
     v = _num(x)
     return dash if v is None else f"{v:,.{d}f}{unit}"
+
+
+def _gate(x, ok, d=1, unit=""):
+    """A percentile cell, daggered when it rests on too few samples."""
+    txt = _fmt(x, d, unit)
+    if ok or txt == "—":
+        return txt
+    return (txt + '<span class="thin" title="under-sampled percentile — see the '
+                  'note below the tables">†</span>')
 
 
 def _chip(text, swatch=None):
@@ -74,6 +82,8 @@ def _header(results, cfg, env) -> str:
     ctx = env.get("max_model_len")
     if ctx:
         chips.append(_chip(f"{int(ctx):,} tok context"))
+    for k, v in (env.get("notes") or {}).items():
+        chips.append(_chip(f"{_esc(k)}: {_esc(v)}", "var(--s2)"))
     return f"""  <header>
     <div class="eyebrow">BetterBench {_esc(__version__)} · {_pretty_ts(env.get("timestamp"))} · {_esc(env.get("host", "?"))}</div>
     <h1>{_esc(env.get("model", "Benchmark run"))}</h1>
@@ -159,8 +169,9 @@ def _tables(rows, conc, pre, env, batched=False) -> str:
              "update p50 (ms)", "update p99 (ms)", "tok/update", "decode med",
              "±IQR", "CV"],
             [[_esc(r["category"].replace("_", " ")), r["runs"], _fmt(r["ttft_p50"]),
-              _fmt(r["ttft_p99"]), _fmt(r["pp_med"]), _fmt(r["update_p50"]),
-              _fmt(r["update_p99"]), _fmt(r["tok_per_update"], 2),
+              _gate(r["ttft_p99"], r["ttft_p99_ok"]), _fmt(r["pp_med"]),
+              _fmt(r["update_p50"]), _gate(r["update_p99"], r["tail_ok"]),
+              _fmt(r["tok_per_update"], 2),
               _fmt(r["decode_med"]), _fmt(r["decode_iqr"]),
               _fmt((r["decode_cv"] or 0) * 100, 1, "%")]
              for r in rows]))
@@ -170,8 +181,9 @@ def _tables(rows, conc, pre, env, batched=False) -> str:
             ["category", "passes", "TTFT p50", "TTFT p99", "PP t/s med",
              "ITL 1% low", "ITL med", "ITL 99% high", "decode med", "±IQR", "CV"],
             [[_esc(r["category"].replace("_", " ")), r["runs"], _fmt(r["ttft_p50"]),
-              _fmt(r["ttft_p99"]), _fmt(r["pp_med"]), _fmt(r["itl_low1"]),
-              _fmt(r["itl_med"]), _fmt(r["itl_high99"]), _fmt(r["decode_med"]),
+              _gate(r["ttft_p99"], r["ttft_p99_ok"]), _fmt(r["pp_med"]),
+              _gate(r["itl_low1"], r["tail_ok"]), _fmt(r["itl_med"]),
+              _gate(r["itl_high99"], r["tail_ok"]), _fmt(r["decode_med"]),
               _fmt(r["decode_iqr"]), _fmt((r["decode_cv"] or 0) * 100, 1, "%")]
              for r in rows]))
     if conc:
@@ -179,7 +191,8 @@ def _tables(rows, conc, pre, env, batched=False) -> str:
             "Concurrency sweep",
             ["level", "ok/req", "aggregate t/s", "TTFT p50", "TTFT p99", "per-req decode med"],
             [[c["level"], f"{c['ok']}/{c['requests']}", _fmt(c["aggregate_tps"]),
-              _fmt(c["ttft_p50"]), _fmt(c["ttft_p99"]), _fmt(c["decode_med"])]
+              _fmt(c["ttft_p50"]), _gate(c["ttft_p99"], c["ttft_p99_ok"]),
+              _fmt(c["decode_med"])]
              for c in conc]))
     if pre:
         body = []
@@ -188,8 +201,9 @@ def _tables(rows, conc, pre, env, batched=False) -> str:
                 body.append([f"{int(d['target_depth']):,}", "—", "—", "—", "<em>skipped</em>", "—"])
             else:
                 body.append([f"{int(d['target_depth']):,}", _fmt(d["prompt_tokens_med"], 0),
-                             _fmt(d["ttft_p50"]), _fmt(d["pp_low1"]), _fmt(d["pp_med"]),
-                             _fmt(d["pp_p99"])])
+                             _fmt(d["ttft_p50"]),
+                             _gate(d["pp_low1"], d["pp_tail_ok"]), _fmt(d["pp_med"]),
+                             _gate(d["pp_p99"], d["pp_tail_ok"])])
         out.append(_table(
             "Prefill sweep · cold prefix cache",
             ["target depth", "prompt tok med", "TTFT p50", "PP 1% low", "PP median", "PP 99% high"],
@@ -322,9 +336,14 @@ def _footer(results, env, cfg) -> str:
         bits.append(f"Corpus hash <code>{_esc(ch)}</code>.")
     if w:
         bits.append(f"Combined-score weights — {_esc(w)}.")
-    bits.append("Results are only comparable within a corpus version. ITL (token-rich) "
-                "is the trustworthy tail metric; per-run p99 needs the run count to "
-                "support it — see METHODOLOGY.md §sample-size.")
+    bits.append("Results are only comparable within a corpus version.")
+    under = sample_gate(results)["under_sampled"]
+    if under:
+        bits.append(f"{len(under)} percentiles are marked † — they rest on fewer "
+                    "samples than <code>n · tail ≥ 5</code> requires (a p99 needs 500 "
+                    "observations), so read them as roughly the worst observed rather "
+                    "than as percentiles. The full list is under <code>sample_gate</code> "
+                    "in the results JSON. See METHODOLOGY.md §sample-size.")
     return "  <footer>" + " ".join(bits) + "</footer>"
 
 
@@ -388,6 +407,7 @@ _TEMPLATE = r"""<!doctype html>
   .chip code { font-family:var(--mono); font-size:12px; }
   .swatch { width:9px; height:9px; border-radius:2px; flex:none; }
 
+  .thin { color:var(--muted); cursor:help; font-weight:400; padding-left:1px; }
   .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:13px; }
   .tile { background:var(--surface); border:1px solid var(--border); border-radius:10px;
           padding:15px 16px; display:flex; flex-direction:column; gap:4px; }

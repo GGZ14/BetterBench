@@ -14,13 +14,20 @@ from .corpus import load_corpus
 from .env import content_hash, fingerprint
 from .metrics import paired_compare
 from .html_report import render_html
-from .report import render_ab_markdown, render_markdown
+from .report import render_ab_markdown, render_markdown, sample_gate
 from .runner import concurrency_sweep, paired_ab, prefill_sweep, single_stream
 
 
 # `--quick` preset: a short smoke run, not a publishable measurement.
 QUICK_PASSES = 5
 QUICK_WARMUP = 1
+
+
+def _kv(value: str) -> tuple[str, str]:
+    key, sep, val = value.partition("=")
+    if not sep or not key.strip():
+        raise argparse.ArgumentTypeError(f"expected KEY=VALUE, got {value!r}")
+    return key.strip(), val.strip()
 
 
 def _positive_int(value: str) -> int:
@@ -95,7 +102,8 @@ def cmd_run(args):
         "corpus_version": CORPUS_VERSION,
         "config": cfg.as_dict(),
         "env": fingerprint(args.endpoint, args.model,
-                           {"categories": list(corpus.keys())}),
+                           {"categories": list(corpus.keys()),
+                            "notes": dict(args.note or [])}),
     }
     results["env"]["corpus_hash"] = content_hash(
         {c: [p.id for p in ps] for c, ps in corpus.items()})
@@ -119,6 +127,10 @@ def cmd_run(args):
     if cfg.run_concurrency and not args.no_concurrency:
         results["concurrency"] = asyncio.run(
             concurrency_sweep(args.endpoint, args.model, corpus, cfg))
+
+    # Persist which percentiles are under-sampled, so the report's footnote is
+    # a recorded fact rather than a claim recomputed at render time.
+    results["sample_gate"] = sample_gate(results)
 
     Path(args.out).write_text(json.dumps(results, indent=2))
     print(f"\nwrote {args.out}")
@@ -150,6 +162,15 @@ def cmd_ab(args):
     })
     corpus = load_corpus(args.corpus, args.categories)
     ab = asyncio.run(paired_ab(args.endpoint_a, args.endpoint_b, args.model, corpus, cfg))
+    # An A/B result that doesn't record which box, which GPU or which day it ran
+    # is not archivable — and A/B is this tool's headline claim.
+    ab = {"schema": RESULTS_SCHEMA, "betterbench_version": __version__,
+          "corpus_version": CORPUS_VERSION, "config": cfg.as_dict(),
+          "env": fingerprint(args.endpoint_a, args.model,
+                             {"categories": list(corpus.keys()),
+                              "endpoint_b": args.endpoint_b,
+                              "notes": dict(args.note or [])}),
+          **ab}
     if args.out:
         Path(args.out).write_text(json.dumps(ab, indent=2))
     print(render_ab_markdown(ab))
@@ -212,6 +233,8 @@ def main(argv=None):
     r.add_argument("--max-model-len", type=int,
                    help="model context window in tokens; overrides auto-detection. "
                         "Prefill depths that don't fit are skipped instead of erroring.")
+    r.add_argument("--note", action="append", type=_kv, metavar="KEY=VALUE",
+                   help='free-form metadata recorded in results.json, e.g. --note image=v0.9.3 --note quant=mxfp4 --note tp=2. Repeatable. These are the details that decide whether two results are comparable at all, and there was no way to record them.')
     r.add_argument("--out", default="results/run.json")
     r.add_argument("--no-html", action="store_true",
                    help="skip the standalone HTML report (written beside --out by default)")
@@ -232,6 +255,8 @@ def main(argv=None):
     ab.add_argument("--max-pairs", type=int, default=200)
     ab.add_argument("--seed", type=int)
     ab.add_argument("--sampled", action="store_true", help="keep sampling (default greedy)")
+    ab.add_argument("--note", action="append", type=_kv, metavar="KEY=VALUE",
+                    help="free-form metadata recorded in the A/B JSON (repeatable)")
     ab.add_argument("--out")
     ab.set_defaults(func=cmd_ab)
 

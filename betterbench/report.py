@@ -88,6 +88,11 @@ def _category_row(cat: str, recs: list[dict]) -> dict:
     n_ok = len([r for r in recs if r.get("ok")])
     tot_chunks = int(np.sum(chunks)) if chunks else 0
     row = {
+        # Sample counts behind each tail, so the reader (and the gate) can see
+        # what a percentile actually rests on.
+        "ttft_n": ttft_d.n, "gap_n": gap_d.n,
+        "ttft_p99_ok": enough_samples_for_percentile(ttft_d.n, 99),
+        "tail_ok": enough_samples_for_percentile(gap_d.n, 99),
         "category": cat,
         "runs": n_ok,
         "tokens": int(np.sum(comp)) if comp else 0,
@@ -113,6 +118,48 @@ def _category_row(cat: str, recs: list[dict]) -> dict:
     return row
 
 
+def _gate(x, ok, fmt=None) -> str:
+    """Render a percentile, daggered when it rests on too few samples."""
+    fmt = fmt or _fmt
+    txt = fmt(x)
+    return txt if (ok or txt == "—") else txt + "†"
+
+
+GATE_NOTE = (
+    "† this percentile rests on fewer samples than `n · tail ≥ 5` requires — a "
+    "p99 needs 500 observations, and 20 passes give 20. Read it as \"roughly the "
+    "worst observed\", not as a percentile. The full list is under `sample_gate` "
+    "in `results.json`.")
+
+
+def sample_gate(results: dict) -> dict:
+    """Which percentiles in this report are under-sampled, and by how much.
+
+    `enough_samples_for_percentile` has existed since 0.1 and was imported by
+    this module without ever being called, while three documents claimed
+    under-sampled percentiles were flagged. This is the thing that makes the
+    claim true, and it is persisted so the claim is checkable after the fact.
+    """
+    under = []
+
+    def check(section, key, metric, n, pct=99):
+        if not enough_samples_for_percentile(n, pct):
+            tail = min(pct, 100 - pct) / 100.0
+            under.append({"section": section, "key": key, "metric": metric,
+                          "n": int(n), "need": int(np.ceil(5 / tail))})
+
+    for r in single_rows(results):
+        check("single_stream", r["category"], "ttft_p99", r["ttft_n"])
+        check("single_stream", r["category"],
+              "update_p99" if r["batched"] else "itl_high99", r["gap_n"])
+    for c in concurrency_rows(results):
+        check("concurrency", c["level"], "ttft_p99", c["ttft_n"])
+    for d in prefill_rows(results):
+        if not d["skipped"]:
+            check("prefill", d["target_depth"], "pp_p99", d["pp_n"])
+    return {"rule": "n * min(pct, 100-pct) / 100 >= 5", "under_sampled": under}
+
+
 def report_is_batched(rows: list[dict]) -> bool:
     """Does this report need the stream-update columns instead of ITL?"""
     return any(r.get("batched") for r in rows)
@@ -133,6 +180,8 @@ def concurrency_rows(results: dict) -> list[dict]:
             "level": s["level"], "ok": s["ok"], "requests": s["requests"],
             "aggregate_tps": s["aggregate_tps"],
             "ttft_p50": td.median, "ttft_p99": td.p99, "decode_med": dd.median,
+            "ttft_n": td.n,
+            "ttft_p99_ok": enough_samples_for_percentile(td.n, 99),
         })
     return rows
 
@@ -151,6 +200,8 @@ def prefill_rows(results: dict) -> list[dict]:
             "target_depth": d["target_depth"], "skipped": False,
             "prompt_tokens_med": pt.median, "ttft_p50": td.median,
             "pp_low1": pp.low_1pct, "pp_med": pp.median, "pp_p99": pp.p99,
+            "pp_n": pp.n,
+            "pp_tail_ok": enough_samples_for_percentile(pp.n, 99),
         })
     return rows
 
@@ -172,6 +223,9 @@ def render_markdown(results: dict) -> str:
              f"**sampling**: {'greedy' if cfg.get('greedy') else 'temp '+str(cfg.get('temperature'))}"
              f"  ·  **passes/cat**: {cfg.get('runs_per_category')}  ·  "
              f"prefix-cache: {'cold (nonce)' if cfg.get('unique_nonce') else 'warm'}")
+    notes = fp.get("notes") or {}
+    if notes:
+        L.append("- **notes**: " + "  ·  ".join(f"`{k}={v}`" for k, v in notes.items()))
     gpu = fp.get("gpu", {})
     if gpu:
         L.append(f"- **gpu**: {gpu.get('vendor','?')} {gpu.get('nvidia_smi', gpu.get('rocm_smi_productname',''))}")
@@ -193,8 +247,8 @@ def render_markdown(results: dict) -> str:
             L.append("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
             for r in rows:
                 L.append(f"| {r['category']} | {r['runs']} | {_fmt(r['ttft_p50'])} | "
-                         f"{_fmt(r['ttft_p99'])} | {_fmt(r.get('pp_med'))} | "
-                         f"{_fmt(r['update_p50'])} | {_fmt(r['update_p99'])} | "
+                         f"{_gate(r['ttft_p99'], r['ttft_p99_ok'])} | {_fmt(r.get('pp_med'))} | "
+                         f"{_fmt(r['update_p50'])} | {_gate(r['update_p99'], r['tail_ok'])} | "
                          f"{_fmt2(r['tok_per_update'])} | {_fmt(r['decode_med'])} | "
                          f"{_fmt(r['decode_iqr'])} | {r['decode_cv']*100:.1f}% |")
         else:
@@ -206,8 +260,9 @@ def render_markdown(results: dict) -> str:
             L.append("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
             for r in rows:
                 L.append(f"| {r['category']} | {r['runs']} | {_fmt(r['ttft_p50'])} | "
-                         f"{_fmt(r['ttft_p99'])} | {_fmt(r.get('pp_med'))} | {_fmt(r['itl_low1'])} | {_fmt(r['itl_med'])} | "
-                         f"{_fmt(r['itl_high99'])} | {_fmt(r['decode_med'])} | "
+                         f"{_gate(r['ttft_p99'], r['ttft_p99_ok'])} | {_fmt(r.get('pp_med'))} | "
+                         f"{_gate(r['itl_low1'], r['tail_ok'])} | {_fmt(r['itl_med'])} | "
+                         f"{_gate(r['itl_high99'], r['tail_ok'])} | {_fmt(r['decode_med'])} | "
                          f"{_fmt(r['decode_iqr'])} | {r['decode_cv']*100:.1f}% |")
         # combined weighted
         weights = cfg.get("weights", {})
@@ -234,7 +289,7 @@ def render_markdown(results: dict) -> str:
         for c in concurrency_rows(results):
             L.append(f"| {c['level']} | {c['ok']}/{c['requests']} | "
                      f"{c['aggregate_tps']:.1f} | {_fmt(c['ttft_p50'])} | "
-                     f"{_fmt(c['ttft_p99'])} | {_fmt(c['decode_med'])} |")
+                     f"{_gate(c['ttft_p99'], c['ttft_p99_ok'])} | {_fmt(c['decode_med'])} |")
         L.append("")
 
     prefill = results.get("prefill", [])
@@ -250,7 +305,8 @@ def render_markdown(results: dict) -> str:
                 continue
             pt_med = f"{d['prompt_tokens_med']:.0f}" if d["prompt_tokens_med"] is not None else "—"
             L.append(f"| {d['target_depth']} | {pt_med} | {_fmt(d['ttft_p50'])} | "
-                     f"{_fmt(d['pp_low1'])} | {_fmt(d['pp_med'])} | {_fmt(d['pp_p99'])} |")
+                     f"{_gate(d['pp_low1'], d['pp_tail_ok'])} | {_fmt(d['pp_med'])} | "
+                     f"{_gate(d['pp_p99'], d['pp_tail_ok'])} |")
         skipped = [str(d["target_depth"]) for d in prefill if d.get("skipped")]
         if skipped:
             ctx = results.get("env", {}).get("max_model_len")
@@ -260,9 +316,10 @@ def render_markdown(results: dict) -> str:
                      f"deeper.*")
         L.append("")
 
-    L.append("---\n*Generated by BetterBench. Percentiles below their reliable "
-             "sample size are flagged in `results.json`; ITL (token-rich) is the "
-             "trustworthy tail metric — see METHODOLOGY.md §sample-size.*")
+    L.append("---")
+    if sample_gate(results)["under_sampled"]:
+        L.append(f"*{GATE_NOTE}*\n")
+    L.append("*Generated by BetterBench. See METHODOLOGY.md §sample-size.*")
     return "\n".join(L)
 
 

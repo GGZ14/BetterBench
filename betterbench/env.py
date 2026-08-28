@@ -51,6 +51,12 @@ def fingerprint(endpoint: str, model: str, extra: dict | None = None) -> dict[st
         "gpu": gpu_info(),
     }
     if extra:
+        # Never let caller-supplied metadata shadow a measured fact: --note
+        # host=whatever must not overwrite the real host this ran on.
+        clash = sorted(set(extra) & set(fp))
+        if clash:
+            raise ValueError(f"metadata keys collide with the environment "
+                             f"fingerprint: {', '.join(clash)}")
         fp.update(extra)
     return fp
 
