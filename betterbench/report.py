@@ -118,6 +118,52 @@ def _category_row(cat: str, recs: list[dict]) -> dict:
     return row
 
 
+# A split is only reported over runs that actually produced one, and only when
+# enough of them did. On a thinking model with a tight max_tokens most runs stop
+# mid-thought, so "we don't know" is the common answer, not the edge case.
+SPLIT_MIN_RUNS = 5
+SPLIT_MIN_SHARE = 0.5
+
+
+def reasoning_rows(results: dict) -> list[dict]:
+    """Per-category thinking/answering split. Shared by both reports."""
+    rows = []
+    for cat, recs in results.get("single_stream", {}).items():
+        ok = [r for r in recs if r.get("ok")]
+        known = [r for r in ok if r.get("reasoning_source") in ("channel",
+                                                                "inline_marker")
+                 and r.get("reasoning_tokens_est") is not None]
+        answered = [r for r in known if r.get("ttfa_ms") is not None]
+        never = sum(1 for r in ok if r.get("truncated_in_reasoning")
+                    or r.get("reasoning_source") == "unknown")
+        r_tok = sum(r["reasoning_tokens_est"] for r in known)
+        tot_tok = r_tok + sum(r.get("answer_tokens_est") or 0 for r in known)
+        enough = len(known) >= SPLIT_MIN_RUNS and (
+            len(known) / len(ok) >= SPLIT_MIN_SHARE if ok else False)
+        rows.append({
+            "category": cat,
+            "runs": len(ok),
+            "known": len(known),
+            "answered": len(answered),
+            "never_answered": never,
+            "reasoning_share": (r_tok / tot_tok) if (enough and tot_tok) else None,
+            "ttfa_p50": (summarize([r["ttfa_ms"] for r in answered]).median
+                         if len(answered) >= SPLIT_MIN_RUNS else None),
+        })
+    return rows
+
+
+def has_reasoning_evidence(rows: list[dict]) -> bool:
+    return any(r["known"] for r in rows)
+
+
+def truncation_summary(results: dict) -> tuple[int, int]:
+    """(runs stopped at max_tokens, total ok runs) across the single-stream set."""
+    ok = [r for recs in results.get("single_stream", {}).values() for r in recs
+          if r.get("ok")]
+    return sum(1 for r in ok if r.get("finish_reason") == "length"), len(ok)
+
+
 def _gate(x, ok, fmt=None) -> str:
     """Render a percentile, daggered when it rests on too few samples."""
     fmt = fmt or _fmt
@@ -280,6 +326,35 @@ def render_markdown(results: dict) -> str:
                      f"update (`chunk_token_mismatch`). Per-token ITL is not reported "
                      f"for them — see METHODOLOGY.md §chunk-token.*")
         L.append("")
+
+    rrows = reasoning_rows(results)
+    if has_reasoning_evidence(rrows):
+        L.append("## Reasoning / answer split\n")
+        L.append("A per-token rate cannot see how much of a run was spent "
+                 "thinking. Two configs with identical decode t/s can take very "
+                 "different times to reach an answer. **TTFA** is time to the "
+                 "first *answer* token — the wait a reader actually feels.\n")
+        L.append("| category | runs w/ split | reasoning share (est) | TTFA p50 (ms) | never reached answer |")
+        L.append("|---|--:|--:|--:|--:|")
+        for r in rrows:
+            share = (f"{r['reasoning_share']*100:.0f}%"
+                     if r["reasoning_share"] is not None else "—")
+            L.append(f"| {r['category']} | {r['known']}/{r['runs']} | {share} | "
+                     f"{_fmt(r['ttfa_p50'])} | {r['never_answered']}/{r['runs']} |")
+        L.append(f"\n*A `—` means too few runs reached an answer to say "
+                 f"(fewer than {SPLIT_MIN_RUNS}, or under half the passes). Runs "
+                 f"cut off before any answer began are counted, not folded in: "
+                 f"crediting their output as an answer would flatter the result. "
+                 f"Token counts are apportioned by character count, so the share "
+                 f"is an estimate — punctuation-dense answers (json, code) are "
+                 f"under-counted.*")
+        L.append("")
+
+    trunc, tot = truncation_summary(results)
+    if tot and trunc:
+        L.append(f"*Stopped at `max_tokens`: **{trunc}/{tot}** runs "
+                 f"({trunc/tot*100:.0f}%). On a thinking model a truncated run "
+                 f"measures the thinking phase, not a complete answer.*\n")
 
     sweep = results.get("concurrency", [])
     if sweep:

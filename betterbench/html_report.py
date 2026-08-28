@@ -15,8 +15,10 @@ import math
 from datetime import datetime
 
 from . import __version__
-from .report import (combined_score, concurrency_rows, prefill_rows,
-                     report_is_batched, sample_gate, single_rows)
+from .report import (combined_score, concurrency_rows,
+                     has_reasoning_evidence, prefill_rows,
+                     reasoning_rows, report_is_batched, sample_gate,
+                     single_rows, truncation_summary)
 
 
 def _num(x):
@@ -160,7 +162,22 @@ def _table(caption, headers, body_rows) -> str:
       </table>"""
 
 
-def _tables(rows, conc, pre, env, batched=False) -> str:
+def _reasoning_table(rrows) -> list[str]:
+    if not has_reasoning_evidence(rrows):
+        return []
+    body = []
+    for r in rrows:
+        share = (f"{r['reasoning_share']*100:.0f}%"
+                 if r["reasoning_share"] is not None else "—")
+        body.append([_esc(r["category"].replace("_", " ")),
+                     f"{r['known']}/{r['runs']}", share, _fmt(r["ttfa_p50"]),
+                     f"{r['never_answered']}/{r['runs']}"])
+    return [_table("Reasoning / answer split · TTFA is time to the first answer token",
+                   ["category", "runs w/ split", "reasoning share (est)",
+                    "TTFA p50 (ms)", "never reached answer"], body)]
+
+
+def _tables(rows, conc, pre, env, batched=False, rrows=()) -> list | str:
     out = []
     if rows and batched:
         out.append(_table(
@@ -194,6 +211,7 @@ def _tables(rows, conc, pre, env, batched=False) -> str:
               _fmt(c["ttft_p50"]), _gate(c["ttft_p99"], c["ttft_p99_ok"]),
               _fmt(c["decode_med"])]
              for c in conc]))
+    out += _reasoning_table(rrows)
     if pre:
         body = []
         for d in pre:
@@ -229,6 +247,7 @@ def render_html(results: dict) -> str:
     pre = prefill_rows(results)
     comb = combined_score(results, rows)
     batched = report_is_batched(rows)
+    rrows = reasoning_rows(results)
 
     live_pre = [p for p in pre if not p["skipped"]]
     skipped = [int(p["target_depth"]) for p in pre if p["skipped"]]
@@ -320,7 +339,7 @@ def render_html(results: dict) -> str:
     page = page.replace("__HEADER__", _header(results, cfg, env))
     page = page.replace("__TILES__", _tiles(comb, conc, pre, cfg, batched))
     page = page.replace("__FIGURES__", "\n".join(figs))
-    page = page.replace("__TABLES__", _tables(rows, conc, pre, env, batched))
+    page = page.replace("__TABLES__", _tables(rows, conc, pre, env, batched, rrows))
     page = page.replace("__FOOTER__", _footer(results, env, cfg))
     page = page.replace("__DATA__", json.dumps(data))
     return page
@@ -337,6 +356,11 @@ def _footer(results, env, cfg) -> str:
     if w:
         bits.append(f"Combined-score weights — {_esc(w)}.")
     bits.append("Results are only comparable within a corpus version.")
+    trunc, tot = truncation_summary(results)
+    if tot and trunc:
+        bits.append(f"Stopped at <code>max_tokens</code>: {trunc}/{tot} runs "
+                    f"({trunc / tot * 100:.0f}%) — on a thinking model a truncated "
+                    "run measures the thinking phase, not a complete answer.")
     under = sample_gate(results)["under_sampled"]
     if under:
         bits.append(f"{len(under)} percentiles are marked † — they rest on fewer "
