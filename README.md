@@ -31,6 +31,10 @@ betterbench report results/radiance-27b.json --html
 betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 --passes 10
 betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 --quick
 
+# Record what the run actually was, so two results can be compared later
+betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 \
+                --note image=v0.9.3 --note quant=mxfp4 --note kv=fp8 --note tp=2
+
 # Rigorous paired A/B between two endpoints (e.g. two images on ports 8080/8081)
 betterbench ab --endpoint-a http://host:8080/v1 --endpoint-b http://host:8081/v1 \
                --model Qwen3.8 --mde 1.0
@@ -38,9 +42,21 @@ betterbench ab --endpoint-a http://host:8080/v1 --endpoint-b http://host:8081/v1
 
 ## What you get
 
-**Single-stream table** — per category: TTFT p50/p99, ITL as tokens/sec
-(1% low = slowest tokens / median / 99% high = fastest), decode t/s median ± IQR, and a
-weighted combined score.
+**Single-stream table** — per category: TTFT p50/p99, decode t/s median ± IQR, a weighted
+combined score, and a latency pair that depends on what the server actually streams:
+
+- **one token per update** — ITL as tokens/sec (1% low = slowest tokens / median / 99% high
+  = fastest), exactly as before;
+- **several tokens per update** (speculative decoding — MTP, EAGLE, Medusa, n-gram,
+  DFlash2) — `update p50 / p99 (ms)` and `tok/update` instead. Tokens that arrive together
+  in one network write have no time *between* them, so BetterBench reports the gap it
+  measured rather than inventing a per-token number. p99 is the stutter.
+
+**Reasoning / answer split** — on a thinking model, TTFT is time to the first *thinking*
+token, a wait nobody experiences. Where the split is detectable, the report adds the
+reasoning share and **TTFA** — time to the first *answer* token — always with the `k/N` runs
+it was computed over. A run cut off before `</think>` is recorded as `unknown`, not as an
+answer.
 
 **Prompt-processing (prefill) sweep** — prefill throughput (prompt tokens ÷ TTFT) at
 increasing input depth (2K → 64K), with a cold prefix cache and tiny decode, so you see how
@@ -84,8 +100,9 @@ controls for it (see [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md)):
 - **Greedy + fixed seed** (A/B default) → identical token counts, no sampling variance.
 - **Nonce prefixes** → honest prefill (no accidental prefix-cache hits).
 - **Power analysis / run-to-confidence** → runs until the Δ CI is tighter than your target MDE.
-- **Sample-size honesty** → ITL (token-rich) is the trustworthy tail metric; per-run p99 is only
-  shown when the run count supports it.
+- **Sample-size honesty** → every percentile below `n · tail ≥ 5` is marked `†` and the
+  shortfall is recorded in `results.json`. The token-rich gap series is the trustworthy tail;
+  a per-run p99 at 20 passes is labelled for what it is.
 - **Null-test gate** → the tool proves it can't manufacture a phantom win before you trust it.
 
 ## Validate the harness (no GPU needed)
@@ -94,6 +111,10 @@ controls for it (see [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md)):
 python tools/self_test.py
 # checks timing accuracy against a mock SSE server (known TTFT/ITL)
 # and the null A/B test (same endpoint vs itself must report "within noise")
+
+pip install -e ".[dev]" && python -m pytest -q
+# gap math under batched streams, the sample-size gate, the A/B sign convention,
+# the reasoning split, and re-rendering a v0.2.3 results file
 ```
 
 ## Corpus

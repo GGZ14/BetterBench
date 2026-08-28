@@ -1,10 +1,10 @@
-# RealBench — a real-world LLM inference benchmark suite
+# BetterBench — a real-world LLM inference benchmark suite
 
 A plan for an open-source, percentile-based inference benchmark that measures how a
 serving stack *actually feels* across representative task categories, against any
 OpenAI-compatible `/v1` endpoint.
 
-**Status:** design / planning · **License:** Apache-2.0 · **Language:** Python 3.11+
+**Status:** implemented (v0.3.0) · **License:** Apache-2.0 · **Language:** Python 3.10+
 
 ---
 
@@ -32,7 +32,7 @@ OpenAI-compatible `/v1` endpoint.
 - Output *quality/correctness* scoring. This suite is **speed-only** by design; a fast-but-wrong
   config is out of scope for v1 (a future `--verify` mode is noted in the roadmap).
 - Training/fine-tuning benchmarks.
-- Engine-internal profiling (kernel timings) — that's what rocprof/nsys are for; RealBench
+- Engine-internal profiling (kernel timings) — that's what rocprof/nsys are for; BetterBench
   measures the black-box endpoint.
 
 ---
@@ -47,18 +47,26 @@ server's reported `usage`. Three layers:
 - Dominated by prompt length (prefill) at low load, and by queueing at high concurrency.
 - Reported per category and per input-length bucket.
 
-### 2.2 Inter-token latency (ITL) — decode smoothness, the "1% low" star metric
-- For each streamed chunk after the first, record arrival time and the number of tokens it
-  carried; `ITL_per_token = Δt_chunk / tokens_in_chunk`.
-- **This is where the gaming-style "1% low" belongs.** Because a single long generation
-  yields hundreds–thousands of ITL samples, category-level tail percentiles are
-  statistically robust from a modest number of runs.
-- Map latency ↔ speed explicitly so both are legible:
-  - **"1% low" tok/s** = `1 / p99(ITL)` — the slowest 1% of tokens (stutter).
-  - **median tok/s** = `1 / p50(ITL)`.
-  - **"99% high" tok/s** = `1 / p1(ITL)` — the fastest tokens.
-- Also report the gaming convention explicitly: **1%-low** and **0.1%-low** as the *mean of
-  the worst 1% / 0.1%* of per-token rates, clearly labeled alongside the raw percentiles.
+### 2.2 Stream-update gap and inter-token latency — decode smoothness
+- For each streamed update after the first, record its arrival time. The **gap between
+  updates is the measurement**; nothing is derived from it by division.
+- Classify each record as one-token-per-update or batched (§ chunk↔token in METHODOLOGY).
+  - **One token per update.** The update gap *is* the inter-token latency. Report it as
+    today: **median tok/s** = `1/p50(ITL)`, **"99% high" tok/s** = `1/p1(ITL)`, and a
+    gaming-style **"1% low"** = mean of the worst 1% of per-token rates (`0.1%-low` is
+    computed but not printed). Note these are two different estimators; the column headers
+    say which is which.
+  - **Several tokens per update.** Report **update p50 / p99 (ms)** and **tok/update**, and
+    emit no per-token latency at all.
+- This supersedes the original design, which specified
+  `ITL_per_token = Δt_chunk / tokens_in_chunk`. That formula is the origin of the defect
+  fixed in 0.3.0 — and note the implementation was worse still, applying a single per-run
+  scalar. Even the per-chunk version invents arrival times for tokens that arrived together
+  in one network write. A tail statistic computed from invented arrival times is not a
+  measurement of anything.
+- Because a single long generation yields hundreds–thousands of gap samples, category-level
+  tail percentiles are far better supported than per-run ones — but batching by 4x means 4x
+  fewer samples, so the gate in §6.3 applies here too and thin categories are marked.
 
 ### 2.3 End-to-end tokens/sec (per run) — the throughput number
 - `decode_tps = completion_tokens / (t_last_token − t_first_token)`.
@@ -98,7 +106,7 @@ for each. Every category carries prompts spanning a 2-D grid:
 | **medium input (2–8k)** | json extract | code gen | reasoning essay |
 | **long input (16–64k)** | needle/lookup | summarize | large refactor |
 
-This is what separates RealBench from "one 128-token prompt": a file-edit at 32k input / 200
+This is what separates BetterBench from "one 128-token prompt": a file-edit at 32k input / 200
 output stresses prefill + TTFT, while story-writing at 200 input / 3k output stresses decode
 ITL. The report breaks results down by this grid so a stack's strengths/weaknesses are visible.
 
@@ -108,7 +116,7 @@ ITL. The report breaks results down by this grid so a stack's strengths/weakness
   (`[run a3f9c1] …`) by default so prefill is measured honestly. A `--warm-cache` mode can
   additionally report the cached-prefill case, labeled separately — never mixed.
 - **Output-length normalization.** Under real sampling, output length varies run to run, which
-  skews per-request numbers. RealBench reports **per-token** rates (immune to length) as
+  skews per-request numbers. BetterBench reports **per-token** rates (immune to length) as
   primary, always alongside the token counts, and caps `max_tokens` per grid cell so runs are
   comparable.
 - **Sampling.** Default realistic sampling (`temp 0.7, top_p 0.95, top_k 20`) with a fixed
@@ -177,8 +185,16 @@ realbench compare results/*.json          # side-by-side table across stacks
 ### 6.1 Reasoning tokens
 Models like Qwen3.6 emit a separate reasoning channel (`reasoning` / `reasoning_content`).
 The harness **counts reasoning tokens as generated tokens** for ITL and t/s (they are real
-decode work), TTFT is time to the first token of *any* channel, and the report shows
-reasoning vs answer token split per category (thinking can dominate short prompts).
+decode work), TTFT is time to the first token of *any* channel, and the report shows the
+reasoning vs answer token split per category alongside **TTFA** — time to the first *answer*
+token, which is the wait a reader actually feels (thinking can dominate short prompts).
+
+The split is detected from the channel switch or from an inline `</think>`, and apportioned
+from the server's single token total by character count, so it is an estimate. A run
+truncated before any answer began reports `reasoning_source="unknown"` with the split left
+as `None` — never zeros, which would credit an answer that never arrived. Since most runs
+under a tight `max_tokens` end that way, the split table always shows the `k/N` runs it is
+computed over and withholds a figure it cannot support.
 
 ### 6.2 Warmup and cache state
 - Discard the first K runs per category (cold compile / autotune / graph capture).
@@ -189,9 +205,11 @@ reasoning vs answer token split per category (thinking can dominate short prompt
 Tail percentiles need enough samples or they're noise:
 - **ITL percentiles** — token-rich; a few long generations give thousands of samples →
   1%-low is trustworthy from ~20 runs/category. This is why ITL is the primary tail metric.
-- **Per-run t/s percentiles** — one sample per run; a real p99 needs ~100+ runs/category.
-  RealBench **auto-warns** when the requested run count is too low for a requested percentile
-  and falls back to median + IQR rather than printing a meaningless p99.
+- **Per-run t/s percentiles** — one sample per run; a real p99 needs 500 samples under the
+  `n · tail ≥ 5` rule. BetterBench **marks** every percentile below that threshold with a `†`
+  and records the shortfall under `sample_gate` in `results.json`. It marks rather than
+  suppresses: TTFT p99 fails the rule at every pass count the tool offers, and deleting the
+  column would cost more than labelling it honestly does.
 
 ### 6.4 Aggregation
 - Per **category**, per **grid cell**, and **combined** (weighted by a declared real-world
@@ -211,7 +229,7 @@ params, timestamp, and a content hash of the exact prompts used. Embedded in `re
 To call a ~1% improvement *real*, the uncertainty on the measured **difference** must be well
 under 1%. On these stacks, raw run-to-run noise is commonly **3–8%** (cache warmth, GPU
 clock/thermal drift, scheduler nondeterminism, sampling-induced length variance) — that alone
-buries a 1% signal. RealBench gets there not by brute precision but by controlling variance and
+buries a 1% signal. BetterBench gets there not by brute precision but by controlling variance and
 comparing in pairs.
 
 **A. Paired, interleaved A/B — the primary lever.** Never compare two configs from separate
@@ -227,7 +245,7 @@ length-induced variance vanishes. Sampled mode stays for realism, but 1%-resolut
 require greedy.
 
 **C. Thermal / clock steady-state.** GPU boost clocks track temperature and power; a cold card
-runs fast then throttles. RealBench warms to a **thermal plateau** before measuring and records
+runs fast then throttles. BetterBench warms to a **thermal plateau** before measuring and records
 clock/temp/power per run (endpoint host or sidecar). Optionally pin clocks (disable DVFS / fix
 SCLK) for maximum stability; whether pinned is recorded. Runs that drift beyond tolerance are
 flagged and excluded.
@@ -237,14 +255,14 @@ client, localhost/dedicated link. Background load is recorded; the full fingerpr
 per §6.5.
 
 **E. Power analysis / auto-run-to-confidence.** From the observed coefficient of variation,
-RealBench computes the runs needed for a target **minimum detectable effect (MDE)** — default
+BetterBench computes the runs needed for a target **minimum detectable effect (MDE)** — default
 **1% at 95% confidence** — as `n ≈ (z·CV / MDE)²`, using the (much smaller) CV of the paired
 *difference*. It can **sequentially run until the Δ CI is tighter than the MDE**, then stop, so
 you never guess the run count.
 
 **F. Report significance, never vibes.** Every comparison prints the effect with a
 bootstrap/t confidence interval and a verdict, e.g. `decode: +1.3% ± 0.4% (95% CI) —
-SIGNIFICANT` vs `+0.6% ± 1.4% — within noise, not distinguishable`. RealBench refuses to declare
+SIGNIFICANT` vs `+0.6% ± 1.4% — within noise, not distinguishable`. BetterBench refuses to declare
 a winner when the CI straddles zero.
 
 **G. Lead with the tightest metric.** ITL **median** (thousands of token samples) is far more
@@ -316,10 +334,10 @@ resolution claims stay honest.
 | Client-side timing jitter | Localhost/low-latency link; warmup; many samples; cross-check server `usage`; report client vs server delta |
 | Prefix-cache inflates prefill | Nonce prefixes by default; warm-cache is a separate labeled run |
 | Output-length variance skews per-request numbers | Per-token metrics primary; `max_tokens` caps per grid cell; token counts always shown |
-| Tail percentiles from too few samples | Auto-warn + fall back to median/IQR; ITL (token-rich) is the primary tail metric |
-| Reasoning tokens miscounted | Count all channels; report reasoning/answer split |
+| Tail percentiles from too few samples | Mark with † + record the shortfall in `sample_gate`; gap series (token-rich) is the primary tail metric |
+| Reasoning tokens miscounted | Count all channels; report reasoning/answer split and TTFA; report `unknown` rather than zero when truncated mid-thought |
 | Cross-engine unfairness | Pin corpus version; disclose full config; standardized warmup; identical sampling |
-| Chunk≠token (servers batch tokens per SSE chunk) | Normalize ITL by tokens-in-chunk; validate against `usage.completion_tokens` |
+| Chunk≠token (servers batch tokens per SSE chunk) | Detect it and report a different metric — update p50/p99 + tok/update. Never normalize a gap into a per-token latency: the tokens in an update arrived together |
 | Thermal/clock drift buries a 1% signal | Thermal-plateau warmup; per-run clock/temp/power capture; optional clock pinning; drift-tolerance exclusion (§7C) |
 | A-vs-B session drift falsely credits/penalizes a change | Interleaved paired A/B with CI on the difference; null-test gate; never compare across sessions (§7A, §7H) |
 | Under-powered comparison claims a phantom win | Power analysis sets required n for a 1% MDE; auto-run-to-confidence; significance verdicts refuse noise-band winners (§7E, §7F) |

@@ -1,6 +1,6 @@
 [project]
 name = "betterbench"
-version = "0.2.3"
+dynamic = ["version"]
 description = "A real-world, percentile-based LLM inference benchmark for any OpenAI-compatible endpoint."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -17,6 +17,10 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 betterbench = "betterbench.cli:main"
+
+# Single source of truth: betterbench/__init__.py.
+[tool.hatch.version]
+path = "betterbench/__init__.py"
 
 [build-system]
 requires = ["hatchling"]
