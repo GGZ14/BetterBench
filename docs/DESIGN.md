@@ -4,7 +4,7 @@ A plan for an open-source, percentile-based inference benchmark that measures ho
 serving stack *actually feels* across representative task categories, against any
 OpenAI-compatible `/v1` endpoint.
 
-**Status:** implemented (v0.3.0) · **License:** Apache-2.0 · **Language:** Python 3.10+
+**Status:** implemented (v0.4.0) · **License:** Apache-2.0 · **Language:** Python 3.10+
 
 ---
 

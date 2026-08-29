@@ -19,13 +19,18 @@ pip install -e .          # editable install works out of the box; needs Python 
 ## Quickstart
 
 ```bash
-# Benchmark one endpoint (single-stream + concurrency sweep) and print the report
+# Benchmark one endpoint (single-stream, prefill and concurrency sweeps) and print
+# the report
 betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 \
                 --out results/radiance-27b.json
 
 # Re-render a saved result later (markdown to stdout, or a charted HTML page)
 betterbench report results/radiance-27b.json
 betterbench report results/radiance-27b.json --html
+
+# Run just one phase — decode, prompt processing, or the concurrency sweep
+betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 --prefill
+betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 --decode --concurrency
 
 # Choose how many measured passes per category (default 20), or take the 5-pass shortcut
 betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 --passes 10
@@ -73,6 +78,14 @@ banner and recorded in the report so a quick result can't be mistaken for a full
 **Concurrency sweep** — aggregate throughput and per-request TTFT/decode percentiles at
 increasing load, revealing the throughput/latency knee.
 
+**Phases you can run one at a time** — `--decode` (single-stream, batch = 1), `--prefill`
+(the prompt-processing depth sweep) and `--concurrency` (the load sweep). Naming a phase runs
+only the phases named, so re-measuring prompt processing after a kernel change costs the
+prefill sweep and nothing else; name several to run several. With none named all three run,
+as before. `--prefill` reads no corpus — the sweep builds its own prompts by depth — and a
+partial result records which phases it holds, so a prefill-only file can't be mistaken for a
+full run.
+
 **A charted HTML report** — every `run` also writes a standalone `.html` beside its
 `results.json` (same basename), so the numbers land as something you can actually read: headline
 tiles, decode throughput per category against the combined score, the ITL 1%-low → 99%-high range
@@ -114,7 +127,7 @@ python tools/self_test.py
 
 pip install -e ".[dev]" && python -m pytest -q
 # gap math under batched streams, the sample-size gate, the A/B sign convention,
-# the reasoning split, and re-rendering a v0.2.3 results file
+# the reasoning split, phase selection end-to-end, and re-rendering a v0.2.3 results file
 ```
 
 ## Corpus

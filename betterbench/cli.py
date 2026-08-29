@@ -67,6 +67,34 @@ def _emit_html(results: dict, out: str, html_out: str | None, disabled: bool) ->
     print(f"    file://{path.resolve()}")
 
 
+# The three measured phases, in the order they run: CLI selector flag -> the
+# Config field that decides whether the phase happens at all.
+PHASES = {"decode": "run_single_stream",
+          "prefill": "run_prefill",
+          "concurrency": "run_concurrency"}
+
+
+def _phase_overrides(args) -> dict:
+    """Resolve --decode / --prefill / --concurrency into Config overrides.
+
+    Naming a phase selects it and *only* it, so `--prefill` is the whole
+    command needed to re-measure prompt processing; naming several runs those
+    several. With none named, nothing here overrides the config file — the
+    older `--no-*` flags still switch a phase off, and a `run_*: false` in a
+    --config file is finally honoured instead of being overwritten.
+    """
+    selected = set(args.only or ())
+    contradicted = [f"--{n}" for n in ("prefill", "concurrency")
+                    if n in selected and getattr(args, f"no_{n}")]
+    if contradicted:
+        sys.exit(f"{' and '.join(contradicted)} asked for and switched off in the "
+                 f"same command — drop one.")
+    if selected:
+        return {field: (name in selected) for name, field in PHASES.items()}
+    return {"run_prefill": False if args.no_prefill else None,
+            "run_concurrency": False if args.no_concurrency else None}
+
+
 def cmd_run(args):
     # --passes wins over the config file; --quick only fills in what wasn't asked
     # for explicitly, so `--quick --warmup 3` keeps the 3 warmups you asked for.
@@ -77,11 +105,19 @@ def cmd_run(args):
 
     cfg = _load(args.config, {
         "runs_per_category": passes, "warmup": warmup,
-        "greedy": args.greedy or None, "run_concurrency": not args.no_concurrency,
+        "greedy": args.greedy or None,
         "seed": args.seed, "max_model_len": args.max_model_len,
+        **_phase_overrides(args),
     })
-    corpus = load_corpus(args.corpus, args.categories)
-    if not corpus:
+    phases = [name for name, field in PHASES.items() if getattr(cfg, field)]
+    if not phases:
+        sys.exit("every phase is switched off — nothing to measure. Pass "
+                 "--decode, --prefill or --concurrency to pick one.")
+    # The prefill sweep synthesises its own prompts by depth, so a prefill-only
+    # run neither needs a corpus nor should record one it never read.
+    needs_corpus = cfg.run_single_stream or cfg.run_concurrency
+    corpus = load_corpus(args.corpus, args.categories) if needs_corpus else {}
+    if not corpus and needs_corpus:
         if args.corpus:
             sys.exit(f"no prompts found in --corpus {args.corpus!r} "
                      f"(need *.jsonl files; check --categories {args.categories})")
@@ -91,10 +127,15 @@ def cmd_run(args):
                  "\nIf you installed with `pip install -e .`, this is a known "
                  "path issue — update to the latest version, or pass "
                  "--corpus /path/to/corpus/v1 explicitly.")
-    print(f"BetterBench {__version__} · corpus v{CORPUS_VERSION} · "
-          f"{sum(len(v) for v in corpus.values())} prompts in {len(corpus)} categories")
-    print(f"{cfg.warmup} warmup + {cfg.runs_per_category} measured passes per category"
-          f"{'  (quick mode — smoke check, not a publishable result)' if args.quick else ''}")
+    banner = f"BetterBench {__version__} · corpus v{CORPUS_VERSION}"
+    if needs_corpus:
+        banner += (f" · {sum(len(v) for v in corpus.values())} prompts "
+                   f"in {len(corpus)} categories")
+    print(banner)
+    print(f"phases: {', '.join(phases)}")
+    if cfg.run_single_stream:
+        print(f"{cfg.warmup} warmup + {cfg.runs_per_category} measured passes per category"
+              f"{'  (quick mode — smoke check, not a publishable result)' if args.quick else ''}")
 
     results = {
         "schema": RESULTS_SCHEMA,
@@ -109,22 +150,26 @@ def cmd_run(args):
         {c: [p.id for p in ps] for c, ps in corpus.items()})
 
     # Resolve the model's context window: explicit override, else auto-detect.
-    # Used to skip prefill depths that wouldn't fit (avoids HTTP 400s mid-sweep).
-    max_ctx = cfg.max_model_len or get_model_context(args.endpoint, args.model)
-    if max_ctx:
-        print(f"model max context: {max_ctx} tokens"
-              f"{'' if cfg.max_model_len else ' (auto-detected from /v1/models)'}")
-    else:
-        print("model max context: unknown — will skip any depth the server rejects "
-              "(pass --max-model-len to skip up front)")
+    # Used to skip prefill depths that wouldn't fit (avoids HTTP 400s mid-sweep),
+    # so only the prefill sweep is worth an extra /v1/models round trip.
+    max_ctx = cfg.max_model_len
+    if cfg.run_prefill:
+        max_ctx = max_ctx or get_model_context(args.endpoint, args.model)
+        if max_ctx:
+            print(f"model max context: {max_ctx} tokens"
+                  f"{'' if cfg.max_model_len else ' (auto-detected from /v1/models)'}")
+        else:
+            print("model max context: unknown — will skip any depth the server rejects "
+                  "(pass --max-model-len to skip up front)")
     results["env"]["max_model_len"] = max_ctx
 
-    results["single_stream"] = asyncio.run(
-        single_stream(args.endpoint, args.model, corpus, cfg))
-    if cfg.run_prefill and not args.no_prefill:
+    if cfg.run_single_stream:
+        results["single_stream"] = asyncio.run(
+            single_stream(args.endpoint, args.model, corpus, cfg))
+    if cfg.run_prefill:
         results["prefill"] = asyncio.run(
             prefill_sweep(args.endpoint, args.model, cfg, max_ctx=max_ctx))
-    if cfg.run_concurrency and not args.no_concurrency:
+    if cfg.run_concurrency:
         results["concurrency"] = asyncio.run(
             concurrency_sweep(args.endpoint, args.model, corpus, cfg))
 
@@ -228,7 +273,19 @@ def main(argv=None):
                         f"(default {Config().warmup}; {QUICK_WARMUP} under --quick)")
     r.add_argument("--seed", type=int)
     r.add_argument("--greedy", action="store_true", help="temperature=0 (reproducibility)")
-    r.add_argument("--no-concurrency", action="store_true")
+    # Phase selection. Naming any phase runs only the phases named, so
+    # `--prefill` is the whole command for "just re-measure prompt processing".
+    phase = r.add_argument_group(
+        "phase selection",
+        "By default all three phases run. Name one or more to run only those.")
+    phase.add_argument("--decode", dest="only", action="append_const", const="decode",
+                       help="single-stream (batch = 1) decode only")
+    phase.add_argument("--prefill", dest="only", action="append_const", const="prefill",
+                       help="prompt-processing (prefill) depth sweep only "
+                            "(needs no corpus)")
+    phase.add_argument("--concurrency", dest="only", action="append_const",
+                       const="concurrency", help="concurrency sweep only")
+    r.add_argument("--no-concurrency", action="store_true", help="skip the concurrency sweep")
     r.add_argument("--no-prefill", action="store_true", help="skip the prompt-processing sweep")
     r.add_argument("--max-model-len", type=int,
                    help="model context window in tokens; overrides auto-detection. "

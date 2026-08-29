@@ -19,6 +19,7 @@ class Config:
     warmup: int = 3                  # discarded runs per category
     runs_per_category: int = 20      # measured runs per category
     unique_nonce: bool = True        # defeat prefix cache (honest prefill)
+    run_single_stream: bool = True
 
     # concurrency sweep
     concurrency_levels: list[int] = field(default_factory=lambda: [1, 2, 4, 8, 16])

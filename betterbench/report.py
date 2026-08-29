@@ -258,17 +258,37 @@ def combined_score(results: dict, rows: list[dict] | None = None) -> dict | None
     return _combined(rows, results.get("config", {}).get("weights", {}))
 
 
+PHASE_SECTIONS = (("single_stream", "decode"), ("prefill", "prefill"),
+                  ("concurrency", "concurrency"))
+
+
+def phases_present(results: dict) -> list[str]:
+    """Which measured phases this result actually carries.
+
+    Read off the sections themselves, not the config, so a file written before
+    phase selection existed reports what is in it.
+    """
+    return [label for key, label in PHASE_SECTIONS if results.get(key)]
+
+
 def render_markdown(results: dict) -> str:
     L = []
     fp = results.get("env", {})
     cfg = results.get("config", {})
+    phases = phases_present(results)
     L.append(f"# BetterBench report\n")
     L.append(f"- **endpoint**: `{fp.get('endpoint','?')}`  ·  **model**: "
              f"`{fp.get('model','?')}`  ·  **host**: {fp.get('host','?')}")
-    L.append(f"- **corpus**: v{results.get('corpus_version','?')}  ·  "
-             f"**sampling**: {'greedy' if cfg.get('greedy') else 'temp '+str(cfg.get('temperature'))}"
-             f"  ·  **passes/cat**: {cfg.get('runs_per_category')}  ·  "
-             f"prefix-cache: {'cold (nonce)' if cfg.get('unique_nonce') else 'warm'}")
+    bits = [f"- **corpus**: v{results.get('corpus_version','?')}",
+            f"**sampling**: {'greedy' if cfg.get('greedy') else 'temp '+str(cfg.get('temperature'))}"]
+    # passes/cat describes the single-stream phase; on a prefill- or
+    # concurrency-only run it would be a number nothing was measured with.
+    if results.get("single_stream"):
+        bits.append(f"**passes/cat**: {cfg.get('runs_per_category')}")
+    bits.append(f"prefix-cache: {'cold (nonce)' if cfg.get('unique_nonce') else 'warm'}")
+    if len(phases) < len(PHASE_SECTIONS):
+        bits.append(f"**phases**: {', '.join(phases) or 'none'}")
+    L.append("  ·  ".join(bits))
     notes = fp.get("notes") or {}
     if notes:
         L.append("- **notes**: " + "  ·  ".join(f"`{k}={v}`" for k, v in notes.items()))

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.0
+
+### Run one phase at a time
+
+`run` measures three phases — single-stream decode, the prefill depth sweep, the concurrency
+sweep — and until now it was all of them or a `--no-*` flag per phase you did not want.
+Naming a phase now selects it and only it:
+
+```bash
+betterbench run --endpoint ... --model ... --prefill        # prompt processing only
+betterbench run --endpoint ... --model ... --decode         # batch = 1 only
+betterbench run --endpoint ... --model ... --concurrency    # the sweep only
+betterbench run --endpoint ... --model ... --decode --prefill   # both, no sweep
+```
+
+With no phase named, nothing changes: all three run, and `--no-prefill` / `--no-concurrency`
+work as before. Asking for and switching off the same phase in one command is an error rather
+than a silent winner.
+
+- **`--prefill` needs no corpus.** The depth sweep synthesises its own prompts, so a
+  prefill-only run no longer exits on a corpus it was never going to read, and skips the
+  `/v1/models` context probe when no prefill sweep will use it.
+- **A `run_*: false` in a `--config` file is honoured.** `run_concurrency` was overwritten by
+  the CLI default on every run, so only `--no-concurrency` could switch the sweep off; the
+  config key had no effect. `run_single_stream` joins it as a config field.
+- **The report says which phases a result holds.** A partial run's header carries a `phases`
+  line, and `passes/cat` — a single-stream number — is dropped from a result with no
+  single-stream section instead of describing a phase that never ran.
+
 ## 0.3.0
 
 The report now says only what the measurement supports.

@@ -15,8 +15,8 @@ import math
 from datetime import datetime
 
 from . import __version__
-from .report import (combined_score, concurrency_rows,
-                     has_reasoning_evidence, prefill_rows,
+from .report import (PHASE_SECTIONS, combined_score, concurrency_rows,
+                     has_reasoning_evidence, phases_present, prefill_rows,
                      reasoning_rows, report_is_batched, sample_gate,
                      single_rows, truncation_summary)
 
@@ -72,10 +72,14 @@ def _header(results, cfg, env) -> str:
         _chip(_esc(env.get("model", "?")), "var(--s1)"),
         _chip(f'<code>{_esc(env.get("endpoint", "?"))}</code>'),
         _chip(f'corpus v{_esc(results.get("corpus_version", "?"))}'),
-        _chip(f'{_esc(cfg.get("runs_per_category"))} passes/cat'),
         _chip(_esc(sampling)),
         _chip(_esc(cache)),
     ]
+    if results.get("single_stream"):
+        chips.insert(3, _chip(f'{_esc(cfg.get("runs_per_category"))} passes/cat'))
+    phases = phases_present(results)
+    if len(phases) < len(PHASE_SECTIONS):
+        chips.append(_chip(f'phases: {_esc(", ".join(phases) or "none")}'))
     gpu = env.get("gpu") or {}
     if gpu:
         label = gpu.get("nvidia_smi") or gpu.get("rocm_smi_productname") or gpu.get("vendor")
