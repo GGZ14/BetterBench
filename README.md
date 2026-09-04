@@ -80,8 +80,10 @@ answer.
 
 **Prompt-processing (prefill) sweep** — prefill throughput (prompt tokens ÷ TTFT) at
 increasing input depth (2K → 64K), with a cold prefix cache and tiny decode, so you see how
-prompt processing scales for long-context / RAG / big-file workloads. A `PP t/s` column also
-appears per category in the single-stream table.
+prompt processing scales for long-context / RAG / big-file workloads. This sweep is the only
+place BetterBench reports prefill throughput: on the short prompts of the single-stream
+corpus, TTFT is mostly fixed per-request overhead rather than prefill work, so a per-category
+`PP t/s` understates the real figure by more than 2x. That column is gone.
 
 **Run length you control** — `--passes N` sets the measured passes per category (default 20)
 and `--warmup N` the discarded ones; both override whatever a `--config` file says. `--quick`
@@ -171,7 +173,7 @@ under-sampled percentile is labelled wherever it appears.
 
 <p align="center">
   <img src="docs/img/report-tables.png" width="900"
-       alt="The Full numbers section: single-stream per-category table with TTFT, prefill,
+       alt="The Full numbers section: single-stream per-category table with TTFT p50/p99,
             update p50/p99, tokens per update, decode median, IQR and CV; the concurrency
             sweep; the reasoning/answer split with TTFA; and the prefill sweep by depth.">
 </p>

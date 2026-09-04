@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### `PP t/s` is gone from the single-stream table
+
+The single-stream phase reported a per-category `PP t/s (med)` — prompt tokens ÷ TTFT over the
+corpus prompts. On prompts that short, TTFT is dominated by fixed per-request overhead (queue,
+tokenize, the first decode step) rather than by prefill work, so the number came out far below
+what the server actually does: on the same run, `chat` read 2,021 t/s in the single-stream
+table against 4,713 t/s at the 2K depth of the prefill sweep. It was a wrong number in a
+table of right ones, so it has been dropped from both the markdown and HTML reports.
+
+The **prefill sweep is unchanged** and remains the place to read prompt processing — cold
+prefix cache, synthesised prompts at increasing depth, 1% low / median / 99% high. Nothing
+changes in `results.json`: per-run `pp_tps` is still recorded, so older results re-render
+under the new layout and no history is lost.
+
 ## 0.4.0
 
 ### Run one phase at a time

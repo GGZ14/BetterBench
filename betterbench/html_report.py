@@ -186,11 +186,11 @@ def _tables(rows, conc, pre, env, batched=False, rrows=()) -> list | str:
     if rows and batched:
         out.append(_table(
             "Single-stream, batch = 1 · several tokens per stream update",
-            ["category", "passes", "TTFT p50", "TTFT p99", "PP t/s med",
+            ["category", "passes", "TTFT p50", "TTFT p99",
              "update p50 (ms)", "update p99 (ms)", "tok/update", "decode med",
              "±IQR", "CV"],
             [[_esc(r["category"].replace("_", " ")), r["runs"], _fmt(r["ttft_p50"]),
-              _gate(r["ttft_p99"], r["ttft_p99_ok"]), _fmt(r["pp_med"]),
+              _gate(r["ttft_p99"], r["ttft_p99_ok"]),
               _fmt(r["update_p50"]), _gate(r["update_p99"], r["tail_ok"]),
               _fmt(r["tok_per_update"], 2),
               _fmt(r["decode_med"]), _fmt(r["decode_iqr"]),
@@ -199,10 +199,10 @@ def _tables(rows, conc, pre, env, batched=False, rrows=()) -> list | str:
     elif rows:
         out.append(_table(
             "Single-stream, batch = 1",
-            ["category", "passes", "TTFT p50", "TTFT p99", "PP t/s med",
+            ["category", "passes", "TTFT p50", "TTFT p99",
              "ITL 1% low", "ITL med", "ITL 99% high", "decode med", "±IQR", "CV"],
             [[_esc(r["category"].replace("_", " ")), r["runs"], _fmt(r["ttft_p50"]),
-              _gate(r["ttft_p99"], r["ttft_p99_ok"]), _fmt(r["pp_med"]),
+              _gate(r["ttft_p99"], r["ttft_p99_ok"]),
               _gate(r["itl_low1"], r["tail_ok"]), _fmt(r["itl_med"]),
               _gate(r["itl_high99"], r["tail_ok"]), _fmt(r["decode_med"]),
               _fmt(r["decode_iqr"]), _fmt((r["decode_cv"] or 0) * 100, 1, "%")]

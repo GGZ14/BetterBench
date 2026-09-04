@@ -62,9 +62,8 @@ def _collect(recs: list[dict]):
     gaps = [x for r in ok for x in run_gaps_ms(r)]
     comp = [r.get("completion_tokens") or 0 for r in ok]
     chunks = [r.get("n_chunks") or 0 for r in ok]
-    pp = [r["pp_tps"] for r in ok if r.get("pp_tps")]
     batched = sum(1 for r in ok if run_is_batched(r))
-    return ttft, dtps, gaps, comp, chunks, pp, batched
+    return ttft, dtps, gaps, comp, chunks, batched
 
 
 def _fmt(x, unit=""):
@@ -80,11 +79,10 @@ def _fmt2(x, unit=""):
 
 
 def _category_row(cat: str, recs: list[dict]) -> dict:
-    ttft, dtps, gaps, comp, chunks, pp, batched = _collect(recs)
+    ttft, dtps, gaps, comp, chunks, batched = _collect(recs)
     ttft_d = summarize(ttft)
     dtps_d = summarize(dtps)
     gap_d = summarize(gaps)
-    pp_d = summarize(pp)
     n_ok = len([r for r in recs if r.get("ok")])
     tot_chunks = int(np.sum(chunks)) if chunks else 0
     row = {
@@ -97,7 +95,6 @@ def _category_row(cat: str, recs: list[dict]) -> dict:
         "runs": n_ok,
         "tokens": int(np.sum(comp)) if comp else 0,
         "ttft_p50": ttft_d.median, "ttft_p99": ttft_d.p99,
-        "pp_med": pp_d.median,
         # Measured, always present: the wall-clock gap between stream updates.
         "update_p50": gap_d.median if gaps else None,
         "update_p99": gap_d.p99 if gaps else None,
@@ -309,11 +306,11 @@ def render_markdown(results: dict) -> str:
                      "p50/p99** is the measured wall-clock gap between updates "
                      "(p99 is the stutter); **tok/update** is how many tokens land "
                      "per update. TTFT in ms; decode = per-run tok/s.\n")
-            L.append("| category | passes | TTFT p50 | TTFT p99 | PP t/s (med) | update p50 (ms) | update p99 (ms) | tok/update | decode t/s (med) | ±IQR | CV |")
-            L.append("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
+            L.append("| category | passes | TTFT p50 | TTFT p99 | update p50 (ms) | update p99 (ms) | tok/update | decode t/s (med) | ±IQR | CV |")
+            L.append("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
             for r in rows:
                 L.append(f"| {r['category']} | {r['runs']} | {_fmt(r['ttft_p50'])} | "
-                         f"{_gate(r['ttft_p99'], r['ttft_p99_ok'])} | {_fmt(r.get('pp_med'))} | "
+                         f"{_gate(r['ttft_p99'], r['ttft_p99_ok'])} | "
                          f"{_fmt(r['update_p50'])} | {_gate(r['update_p99'], r['tail_ok'])} | "
                          f"{_fmt2(r['tok_per_update'])} | {_fmt(r['decode_med'])} | "
                          f"{_fmt(r['decode_iqr'])} | {r['decode_cv']*100:.1f}% |")
@@ -322,11 +319,11 @@ def render_markdown(results: dict) -> str:
                      "**median**, **99% high** = fastest. This server streams one token "
                      "per update, so the update gap *is* the inter-token latency. "
                      "TTFT in ms; decode = per-run tok/s.\n")
-            L.append("| category | passes | TTFT p50 | TTFT p99 | PP t/s (med) | ITL 1% low | ITL median | ITL 99% high | decode t/s (med) | ±IQR | CV |")
-            L.append("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
+            L.append("| category | passes | TTFT p50 | TTFT p99 | ITL 1% low | ITL median | ITL 99% high | decode t/s (med) | ±IQR | CV |")
+            L.append("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
             for r in rows:
                 L.append(f"| {r['category']} | {r['runs']} | {_fmt(r['ttft_p50'])} | "
-                         f"{_gate(r['ttft_p99'], r['ttft_p99_ok'])} | {_fmt(r.get('pp_med'))} | "
+                         f"{_gate(r['ttft_p99'], r['ttft_p99_ok'])} | "
                          f"{_gate(r['itl_low1'], r['tail_ok'])} | {_fmt(r['itl_med'])} | "
                          f"{_gate(r['itl_high99'], r['tail_ok'])} | {_fmt(r['decode_med'])} | "
                          f"{_fmt(r['decode_iqr'])} | {r['decode_cv']*100:.1f}% |")
