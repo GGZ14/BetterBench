@@ -10,6 +10,21 @@ Unlike most tools that print one average tokens/sec at batch=1, BetterBench repo
 inter-token latency, and per-run throughput — and is engineered to **resolve ~1% differences**
 through paired, drift-cancelled A/B measurement.
 
+Every run also writes a **self-contained HTML report** beside its `results.json` — headline
+tiles, charts and the full tables in one file with no network assets, so it opens offline and
+travels in an email.
+
+<p align="center">
+  <img src="docs/img/report-overview.png" width="900"
+       alt="BetterBench HTML report: run header with the endpoint, corpus version and custom
+            run notes; headline tiles for combined decode, update p99, TTFT p50, aggregate
+            throughput and prefill; and a bar chart of decode throughput per category against
+            the weighted combined score.">
+</p>
+
+**[→ Open the example report](https://htmlpreview.github.io/?https://github.com/GGZ14/BetterBench/blob/main/docs/example-report.html)**
+&nbsp;·&nbsp; more screenshots in [The HTML report](#the-html-report)
+
 ## Install
 
 ```bash
@@ -87,12 +102,9 @@ partial result records which phases it holds, so a prefill-only file can't be mi
 full run.
 
 **A charted HTML report** — every `run` also writes a standalone `.html` beside its
-`results.json` (same basename), so the numbers land as something you can actually read: headline
-tiles, decode throughput per category against the combined score, the ITL 1%-low → 99%-high range
-per category, the concurrency knee, TTFT p50 vs p99, and prefill throughput by depth — plus the
-full tables. One self-contained file with no network assets, so it opens offline and travels in an
-email; it needs no extra dependencies and follows the reader's light/dark theme. Skip it with
-`--no-html`, or point it somewhere else with `--html-out`.
+`results.json` (same basename), charting every phase and carrying the full tables underneath.
+See [The HTML report](#the-html-report) below. Skip it with `--no-html`, or point it somewhere
+else with `--html-out`.
 
 **Paired A/B** — Δ with a 95% confidence interval and a verdict that **refuses to call a
 winner inside the noise band**:
@@ -102,6 +114,80 @@ Decode throughput (B vs A)
 - Δ = +1.34%  (95% CI [+0.91%, +1.77%])
 - B is 1.34% faster — SIGNIFICANT
 ```
+
+## The HTML report
+
+`betterbench run` writes the report automatically; `betterbench report results.json --html`
+re-renders one from a saved result at any time. It is a **single file** — the charts are
+hand-drawn SVG, so there is no chart library, no CDN, no fonts to fetch and no build step.
+Open it offline, attach it to an email, drop it in a PR.
+
+**[→ Open the example report](https://htmlpreview.github.io/?https://github.com/GGZ14/BetterBench/blob/main/docs/example-report.html)**
+&nbsp;·&nbsp; [`docs/example-report.html`](docs/example-report.html)
+
+### Every number is hoverable
+
+The charts are the summary; the detail is one hover away — here, the per-category IQR,
+coefficient of variation and pass count behind a single decode bar. A high CV means that
+category's passes disagreed, which is exactly what you need to know before believing a small
+difference.
+
+<p align="center">
+  <img src="docs/img/report-tooltip.png" width="860"
+       alt="The decode-throughput chart with a tooltip open on the file-edit bar, showing
+            decode 246.7 t/s, an IQR of 35.0, a coefficient of variation of 10.8%, and 5
+            passes.">
+</p>
+
+### The concurrency knee, and prefill by depth
+
+<table>
+<tr>
+<td width="50%" valign="top">
+  <img src="docs/img/report-concurrency.png"
+       alt="Two charts: aggregate throughput rising with concurrency level 1 to 16, and
+            grouped TTFT p50 / p99 bars at each level showing the queueing tail open up.">
+</td>
+<td width="50%" valign="top">
+  <img src="docs/img/report-prefill.png"
+       alt="Prompt-processing throughput by input depth from 2K to 250K tokens, plotted as a
+            line with a shaded 1%-low to 99%-high band.">
+</td>
+</tr>
+<tr>
+<td valign="top">Aggregate throughput against load, and the TTFT p50/p99 pair underneath it —
+where the line flattens and the p99 bar takes off is the knee.</td>
+<td valign="top">Median prefill t/s at increasing input depth against a cold prefix cache, with
+the 1%-low → 99%-high band shaded.</td>
+</tr>
+</table>
+
+### The full tables are still there
+
+Charts are for reading; the tables are for quoting. Every figure that went into them is under
+a `Full numbers` fold — single-stream per category, the concurrency sweep, the reasoning /
+answer split, and the prefill sweep — with the `†` sample-size marks carried through, so an
+under-sampled percentile is labelled wherever it appears.
+
+<p align="center">
+  <img src="docs/img/report-tables.png" width="900"
+       alt="The Full numbers section: single-stream per-category table with TTFT, prefill,
+            update p50/p99, tokens per update, decode median, IQR and CV; the concurrency
+            sweep; the reasoning/answer split with TTFA; and the prefill sweep by depth.">
+</p>
+
+### It follows the reader's theme
+
+No toggle to find and no setting to remember — the report renders light or dark from the
+reader's own `prefers-color-scheme`.
+
+<p align="center">
+  <img src="docs/img/report-overview-dark.png" width="900"
+       alt="The same report header, headline tiles and decode chart rendered in dark mode.">
+</p>
+
+> The screenshots above are a `--quick` smoke run (5 passes per category), which is why the
+> percentiles carry `†` marks — see **Sample-size honesty** below.
 
 ## Why it can see 1%
 
