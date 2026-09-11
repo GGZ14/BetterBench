@@ -107,3 +107,26 @@ def test_ab_authenticates_each_endpoint_with_its_own_key(server, tmp_path):
     text = out.read_text()
     assert json.loads(text)["pairs"] >= 1
     assert "key-a-secret" not in text and "key-b-secret" not in text
+
+
+def test_ab_with_a_miskeyed_endpoint_logs_the_401(server):
+    """A/B pairs need *both* calls to succeed, so a mis-keyed endpoint 401s
+    every pair; the phase used to surface that only as 'pairs: 0'. The
+    failed call must log the error (look at `log` to see it) and an
+    end-of-sweep line must say no pairs survived."""
+    import asyncio
+
+    from betterbench.config import Config
+    from betterbench.corpus import load_corpus
+    from betterbench.runner import paired_ab
+
+    url_a = server(api_key=SEKRET)            # not sending the key -> 401
+    url_b = server()
+    corpus = load_corpus(categories=["reasoning"])
+    cfg = Config(warmup=0, ab_min_pairs=1, ab_max_pairs=2)
+    lines: list[str] = []
+    ab = asyncio.run(paired_ab(url_a, url_b, "mock", corpus, cfg,
+                              log=lines.append))
+    assert ab["pairs"] == 0
+    assert any("401" in l for l in lines), f"no log line surfaces the 401: {lines}"
+    assert any("no pairs" in l for l in lines)

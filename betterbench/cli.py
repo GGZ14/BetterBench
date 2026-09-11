@@ -17,7 +17,7 @@ from .metrics import paired_compare
 from .html_report import render_html
 from .report import render_ab_markdown, render_markdown, sample_gate
 from .runner import concurrency_sweep, paired_ab, prefill_sweep, single_stream
-from .runs import allocate_run_dir
+from .runs import allocate_run_dir, plan_run_dir
 
 
 # `--quick` preset: a short smoke run, not a publishable measurement.
@@ -54,6 +54,27 @@ def _load(cfg_path, overrides: dict) -> Config:
     return cfg
 
 
+def _atomic_write(path: str | Path, text: str) -> None:
+    """Write `text` to `path`: a temp file in the same directory, fsync'd,
+    then renamed onto the target. A run that dies mid-write therefore
+    leaves neither a half-written file — the target is either old or
+    complete new, never part of both — nor a stray temp file: the temp is
+    cleaned up on failure.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _html_path(out: str, html_out: str | None) -> Path:
     return Path(html_out) if html_out else Path(out).with_suffix(".html")
 
@@ -62,9 +83,8 @@ def _emit_html(results: dict, out: str, html_out: str | None, disabled: bool) ->
     """Write the standalone HTML report beside the results JSON."""
     if disabled:
         return
+    _atomic_write(_html_path(out, html_out), render_html(results))
     path = _html_path(out, html_out)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_html(results), encoding="utf-8")
     print(f"\nwrote {path}  —  open it in a browser for the charted report:")
     print(f"    file://{path.resolve()}")
 
@@ -116,7 +136,9 @@ def cmd_run(args):
         passes = QUICK_PASSES if passes is None else passes
         warmup = QUICK_WARMUP if warmup is None else warmup
 
-    out = _resolve_out(args.out, args.model, args.name, "results.json")
+    # The run directory is allocated at *write time* (see `out = _resolve_out`
+    # below), not here: every validation that can `sys.exit` (config, phases,
+    # corpus) must run first, so a failed run leaves no empty directory behind.
     api_key = _api_key(args.api_key)
 
     cfg = _load(args.config, {
@@ -149,7 +171,14 @@ def cmd_run(args):
                    f"in {len(corpus)} categories")
     print(banner)
     print(f"phases: {', '.join(phases)}")
-    print(f"output: {out}")
+    if args.out:
+        print(f"output: {args.out}")
+    else:
+        # the default run directory's *name*, without creating it: allocation
+        # happens when the results are written, and `wrote ...` below prints
+        # the exact name (a same-second collision would earn a -2 suffix).
+        planned = plan_run_dir(args.model, args.name) / "results.json"
+        print(f"output: {planned}  (a fresh run dir; allocated when the results are written)")
     if cfg.run_single_stream:
         print(f"{cfg.warmup} warmup + {cfg.runs_per_category} measured passes per category"
               f"{'  (quick mode — smoke check, not a publishable result)' if args.quick else ''}")
@@ -197,8 +226,11 @@ def cmd_run(args):
     # a recorded fact rather than a claim recomputed at render time.
     results["sample_gate"] = sample_gate(results)
 
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(results, indent=2))
+    # Allocate the run directory now — after validation and after the hours
+    # of measurement — so nothing that can abort the run has pre-created it,
+    # and write the results atomically.
+    out = _resolve_out(args.out, args.model, args.name, "results.json")
+    _atomic_write(out, json.dumps(results, indent=2))
     print(f"\nwrote {out}")
     print(render_markdown(results))
     _emit_html(results, str(out), args.html_out, args.no_html)
@@ -207,15 +239,14 @@ def cmd_run(args):
 def cmd_report(args):
     results = json.loads(Path(args.results).read_text())
     if args.html:
+        _atomic_write(_html_path(args.results, args.out), render_html(results))
         path = _html_path(args.results, args.out)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render_html(results), encoding="utf-8")
         print(f"wrote {path}")
         print(f"    file://{path.resolve()}")
         return
     md = render_markdown(results)
     if args.out:
-        Path(args.out).write_text(md)
+        _atomic_write(args.out, md)
         print(f"wrote {args.out}")
     else:
         print(md)
@@ -224,7 +255,6 @@ def cmd_report(args):
 def cmd_ab(args):
     key_a = _api_key(args.api_key_a)
     key_b = _api_key(args.api_key_b)
-    out = _resolve_out(args.out, args.model, args.name, "ab.json")
     cfg = _load(args.config, {
         "greedy": True if not args.sampled else None,   # A/B defaults to greedy
         "target_mde_pct": args.mde, "ab_max_pairs": args.max_pairs, "seed": args.seed,
@@ -241,8 +271,10 @@ def cmd_ab(args):
                               "endpoint_b": args.endpoint_b,
                               "notes": dict(args.note or [])}),
           **ab}
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(ab, indent=2))
+    # The run directory is allocated at write time (see cmd_run's comment):
+    # nothing before this point may pre-create it.
+    out = _resolve_out(args.out, args.model, args.name, "ab.json")
+    _atomic_write(out, json.dumps(ab, indent=2))
     print(f"wrote {out}")
     print(render_ab_markdown(ab))
 
@@ -370,8 +402,9 @@ def main(argv=None):
 
     args = p.parse_args(argv)
     # Only an explicit --out pre-creates its directory; the default run
-    # directories create themselves, and report/compare without --out write
-    # nothing (a stray `results/x/` in the cwd used to be created for them).
+    # directories are created at write time (a run that dies in validation
+    # leaves nothing), and report/compare without --out write nothing
+    # (a stray `results/x/` in the cwd used to be created for them).
     if getattr(args, "out", None):
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     args.func(args)

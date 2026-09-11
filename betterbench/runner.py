@@ -176,6 +176,7 @@ async def paired_ab(endpoint_a: str, endpoint_b: str, model: str,
     a_tps: list[float] = []; b_tps: list[float] = []
     a_itl: list[float] = []; b_itl: list[float] = []
     batched = False
+    n_failed = 0
 
     def med(samples):
         return float(np.median(samples)) if samples else None
@@ -185,10 +186,18 @@ async def paired_ab(endpoint_a: str, endpoint_b: str, model: str,
         # correct when the box is one server, and the keys are equal when they
         # are not.
         key = api_key_a if ep == endpoint_a else api_key_b
-        return await stream_chat(ep, model, msgs, max_tokens=p.max_tokens,
-                                 temperature=cfg.effective_temp(), top_p=cfg.top_p,
-                                 top_k=cfg.top_k, seed=cfg.seed, timeout=cfg.timeout_s,
-                                 api_key=key)
+        r = await stream_chat(ep, model, msgs, max_tokens=p.max_tokens,
+                             temperature=cfg.effective_temp(), top_p=cfg.top_p,
+                             top_k=cfg.top_k, seed=cfg.seed, timeout=cfg.timeout_s,
+                             api_key=key)
+        if not r.ok:
+            # A pair only counts when BOTH calls succeed, so a mis-keyed
+            # endpoint 401s every call and the sweep would otherwise end as a
+            # silent "pairs: 0". Surface each failure like the sibling phases.
+            nonlocal n_failed
+            n_failed += 1
+            log(f"  ! {ep}: {r.error}")
+        return r
 
     for i in range(cfg.warmup):
         p = flat[i % len(flat)]
@@ -220,6 +229,9 @@ async def paired_ab(endpoint_a: str, endpoint_b: str, model: str,
                 break
 
     tps = paired_compare(a_tps, b_tps, "decode_tps", cfg.conf, higher_is_better=True)
+    if not a_tps and n_failed:
+        log(f"[ab] no pairs survived: {n_failed} failed calls "
+            f"(a pair counts only when both succeed) — see errors above")
     gap_metric = "update_gap_median_ms" if batched else "itl_median_ms"
     itl = paired_compare(a_itl, b_itl, gap_metric, cfg.conf,
                          higher_is_better=False)
