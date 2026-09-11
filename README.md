@@ -278,7 +278,9 @@ controls for it (see [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md)):
 - **Paired, interleaved A/B** on the same warm box → the CI is on the *difference*, cancelling
   thermal/cache drift.
 - **Greedy + fixed seed** (A/B default) → identical token counts, no sampling variance.
-- **Nonce prefixes** → honest prefill (no accidental prefix-cache hits).
+- **Unique prompt bodies** → honest prefill. A nonce prefix alone only defeats a
+  *prefix* cache; the prefill sweep reshuffles the whole filler every pass, so a
+  cache keyed on block content (a per-layer KV LRU) has nothing to hit either.
 - **Power analysis / run-to-confidence** → runs until the Δ CI is tighter than your target MDE.
 - **Sample-size honesty** → every percentile below `n · tail ≥ 5` is marked `†` and the
   shortfall is recorded in `results.json`. The token-rich gap series is the trustworthy tail;

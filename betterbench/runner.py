@@ -126,7 +126,11 @@ async def prefill_sweep(endpoint: str, model: str, cfg: Config, log=print,
         log(f"[prefill] depth ~{depth} tok: warmup {cfg.prefill_warmup} + {cfg.prefill_runs}")
 
         async def one():
-            msgs = make_prefill_messages(depth, nonce(rng))   # unique nonce => no cache
+            # A fresh nonce per pass reseeds the body as well as tagging the
+            # front, so no block of this prompt has been seen before; None
+            # asks for the identical, cacheable prompt every time.
+            msgs = make_prefill_messages(
+                depth, nonce(rng) if cfg.unique_nonce else None)
             return await stream_chat(endpoint, model, msgs,
                                      max_tokens=cfg.prefill_max_tokens, temperature=0.0,
                                      top_p=cfg.top_p, top_k=cfg.top_k, seed=cfg.seed,

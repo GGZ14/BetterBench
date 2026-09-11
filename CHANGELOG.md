@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### The prefill sweep no longer sends the same text twice
+
+The filler behind the nonce was one paragraph repeated to length, which a
+prefix cache could not reuse — its block hashes chain from the start of the
+prompt, and the nonce broke the chain — but a cache keyed on block *content*
+could reuse almost completely. Measured on Qwen3's tokenizer, an 80k-character
+prompt was 918 blocks of 16 tokens with **25 distinct values among them**: a
+per-layer LRU over KV blocks hit on essentially every block, within a single
+pass and across every pass of the sweep, and the sweep timed cache lookups
+instead of prompt processing.
+
+The body is now a fresh random ordering of the same words on every pass — 917
+of 917 blocks distinct, nothing shared between passes. Shuffling rather than
+inventing text keeps the word multiset, and with it the characters-per-token
+ratio, exactly what it was: measured depths move by under 1%, so results
+recorded before this change remain comparable. `unique_nonce: false` still asks
+for the old byte-identical prompt, for measuring a warm cache deliberately —
+which the prefill sweep previously ignored.
+
 ## 0.5.0
 
 **Upgrading:** two defaults moved. `run` without `--out` no longer writes

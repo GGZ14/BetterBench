@@ -118,7 +118,10 @@ comparing in pairs:
    **per-trial difference** (paired-t), so common-mode drift cancels — turning an unresolvable
    ±5% absolute into a ±0.3% CI on Δ.
 2. **Greedy + fixed seed** (A/B default). Identical output token counts → no length variance.
-3. **Nonce prefixes** defeat the prefix cache so prefill timing is honest. A warm-cache mode can
+3. **Unique prompt bodies** defeat the prefix cache *and* content-addressed block
+   caches, so prefill timing is honest: the nonce prefix breaks the chained block
+   hashes a prefix cache uses, and the sweep's filler is reshuffled every pass so no
+   individual KV block repeats within a pass or across passes. A warm-cache mode can
    be reported separately, never mixed.
 4. **Power analysis / run-to-confidence.** From the observed coefficient of variation of the
    paired difference, BetterBench estimates the pairs needed for a target minimum-detectable
