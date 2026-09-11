@@ -128,5 +128,5 @@ def test_ab_with_a_miskeyed_endpoint_logs_the_401(server):
     ab = asyncio.run(paired_ab(url_a, url_b, "mock", corpus, cfg,
                               log=lines.append))
     assert ab["pairs"] == 0
-    assert any("401" in l for l in lines), f"no log line surfaces the 401: {lines}"
-    assert any("no pairs" in l for l in lines)
+    assert any("401" in line for line in lines), f"no log line surfaces the 401: {lines}"
+    assert any("no pairs" in line for line in lines)
