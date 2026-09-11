@@ -128,7 +128,7 @@ prints a line after the run if so — a benchmark a version behind can be
 measuring something the current release already fixed:
 
 ```
-A newer BetterBench is available: v0.5.0 (running 0.4.0) — https://github.com/GGZ14/BetterBench/releases
+A newer BetterBench is available: v0.6.0 (running 0.5.0) — https://github.com/GGZ14/BetterBench/releases
 ```
 
 The check runs on a background thread and is finished **before the first

@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
+
+**Upgrading:** two defaults moved. `run` without `--out` no longer writes
+`results/run.json` into the directory you ran it from — it writes into a fresh
+`~/.betterbench/runs/<timestamp>-<label>/` instead — and `ab` now saves a file
+where it used to only print. A script that reads `results/run.json` from the
+working directory should pass `--out results/run.json` explicitly; `--out` has
+always won and still does.
 
 ### Runs live in `~/.betterbench/runs/`, each in its own versioned directory
 
