@@ -159,3 +159,29 @@ def test_ab_with_every_call_succeeding_but_unpairable_logs_its_summary(server):
     assert not any("failed" in line.lower() for line in lines), \
         f"a 200-only sweep must not log failures: {lines}"
     assert any("all calls succeeded" in line for line in lines)
+
+
+def test_ab_with_zero_pairs_attempted_logs_no_summary(server):
+    """A vacuous config (ab_max_pairs=0, warmup=0) makes no calls at all:
+    calling that 'all calls succeeded' (it didn't) and pointing at the
+    server's streaming shape (which is irrelevant) is misleading — and the
+    failed-calls line is just as wrong here. The vacuous case must
+    emit no end-of-sweep summary of either kind."""
+    import asyncio
+
+    from betterbench.config import Config
+    from betterbench.corpus import load_corpus
+    from betterbench.runner import paired_ab
+
+    url_a = server()
+    url_b = server()
+    corpus = load_corpus(categories=["reasoning"])
+    cfg = Config(warmup=0, ab_min_pairs=1, ab_max_pairs=0)
+    lines: list[str] = []
+    ab = asyncio.run(paired_ab(url_a, url_b, "mock", corpus, cfg,
+                               log=lines.append))
+    assert ab["pairs"] == 0
+    assert not any("no pairs survived" in line for line in lines), \
+        f"a vacuous 0-pair config must log no summary: {lines}"
+    assert not any("all calls succeeded" in line for line in lines)
+    assert not any("failed" in line.lower() for line in lines)

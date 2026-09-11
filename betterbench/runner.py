@@ -235,7 +235,7 @@ async def paired_ab(endpoint_a: str, endpoint_b: str, model: str,
     # Distinct corner: every call 200d but none had pairable data (e.g. a
     # server that emits one-chunk/batched updates) — pairs: 0 with zero
     # failures above only said "pairs: 0".
-    if not a_tps and not n_failed:
+    if not a_tps and not n_failed and cfg.ab_max_pairs > 0:
         log("[ab] no pairs survived: all calls succeeded but none had "
             "pairable gap/throughput data (check the server's streaming "
             "shape — e.g. batched updates)")
