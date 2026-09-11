@@ -72,8 +72,9 @@ betterbench ab --endpoint-a http://host:8080/v1 --endpoint-b http://host:8081/v1
 
 Without `--out`, a run writes into its **own versioned directory** under
 `~/.betterbench/runs/` (`$BETTERBENCH_HOME/runs/` when that variable is set) —
-nothing lands in the directory you ran it from, and re-running can never
-overwrite an earlier result:
+nothing lands in the directory you ran it from (unless `$BETTERBENCH_HOME`
+itself is a relative path — one-time stderr warning if so), and re-running
+can never overwrite an earlier result:
 
 ```bash
 betterbench run --endpoint ... --model Qwen3.8 --name mxfp4-flip
