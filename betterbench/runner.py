@@ -20,13 +20,14 @@ from .prefill import make_prefill_messages
 
 
 async def _one(endpoint: str, model: str, p: Prompt, cfg: Config,
-               rng: random.Random) -> RunResult:
+               rng: random.Random, api_key: str | None = None) -> RunResult:
     msgs = with_nonce(p.messages, nonce(rng)) if cfg.unique_nonce else p.messages
     return await stream_chat(
         endpoint, model, msgs,
         max_tokens=p.max_tokens, temperature=cfg.effective_temp(),
         top_p=cfg.top_p, top_k=cfg.top_k, seed=cfg.seed,
-        category=p.category, prompt_id=p.id, timeout=cfg.timeout_s)
+        category=p.category, prompt_id=p.id, timeout=cfg.timeout_s,
+        api_key=api_key)
 
 
 # --------------------------------------------------------------------------- #
@@ -34,17 +35,18 @@ async def _one(endpoint: str, model: str, p: Prompt, cfg: Config,
 # --------------------------------------------------------------------------- #
 async def single_stream(endpoint: str, model: str,
                         corpus: dict[str, list[Prompt]], cfg: Config,
-                        log=print) -> dict[str, list[dict]]:
+                        log=print, api_key: str | None = None) -> dict[str, list[dict]]:
     results: dict[str, list[dict]] = {}
     rng = random.Random(1234)
     for cat, prompts in corpus.items():
         log(f"[single] {cat}: warmup {cfg.warmup} + {cfg.runs_per_category} runs")
         for i in range(cfg.warmup):
-            await _one(endpoint, model, prompts[i % len(prompts)], cfg, rng)
+            await _one(endpoint, model, prompts[i % len(prompts)], cfg, rng,
+                       api_key)
         recs = []
         for i in range(cfg.runs_per_category):
             p = prompts[i % len(prompts)]
-            r = await _one(endpoint, model, p, cfg, rng)
+            r = await _one(endpoint, model, p, cfg, rng, api_key)
             if not r.ok:
                 log(f"  ! {cat}/{p.id}: {r.error}")
             recs.append(r.as_dict())
@@ -57,7 +59,7 @@ async def single_stream(endpoint: str, model: str,
 # --------------------------------------------------------------------------- #
 async def concurrency_sweep(endpoint: str, model: str,
                             corpus: dict[str, list[Prompt]], cfg: Config,
-                            log=print) -> list[dict]:
+                            log=print, api_key: str | None = None) -> list[dict]:
     flat = [p for ps in corpus.values() for p in ps]
     rng = random.Random(99)
     out = []
@@ -69,7 +71,8 @@ async def concurrency_sweep(endpoint: str, model: str,
 
         async def worker(idx: int):
             async with sem:
-                recs.append(await _one(endpoint, model, flat[idx % len(flat)], cfg, rng))
+                recs.append(await _one(endpoint, model, flat[idx % len(flat)],
+                                      cfg, rng, api_key))
 
         await asyncio.gather(*(worker(i) for i in range(cfg.concurrency_requests)))
         wall = time.perf_counter() - t0
@@ -94,7 +97,8 @@ async def concurrency_sweep(endpoint: str, model: str,
 # Prompt-processing (prefill) sweep — throughput vs input depth
 # --------------------------------------------------------------------------- #
 async def prefill_sweep(endpoint: str, model: str, cfg: Config, log=print,
-                        max_ctx: int | None = None) -> list[dict]:
+                        max_ctx: int | None = None,
+                        api_key: str | None = None) -> list[dict]:
     """Sweep prefill throughput vs input depth.
 
     Depths that can't fit the model's context window are skipped rather than
@@ -127,7 +131,7 @@ async def prefill_sweep(endpoint: str, model: str, cfg: Config, log=print,
                                      max_tokens=cfg.prefill_max_tokens, temperature=0.0,
                                      top_p=cfg.top_p, top_k=cfg.top_k, seed=cfg.seed,
                                      category="prefill", prompt_id=f"pp{depth}",
-                                     timeout=cfg.timeout_s)
+                                     timeout=cfg.timeout_s, api_key=api_key)
 
         rejected = False
         recs = []
@@ -165,20 +169,35 @@ async def prefill_sweep(endpoint: str, model: str, cfg: Config, log=print,
 # --------------------------------------------------------------------------- #
 async def paired_ab(endpoint_a: str, endpoint_b: str, model: str,
                     corpus: dict[str, list[Prompt]], cfg: Config,
-                    log=print) -> dict:
+                    log=print, api_key_a: str | None = None,
+                    api_key_b: str | None = None) -> dict:
     flat = [p for ps in corpus.values() for p in ps]
     rng = random.Random(7)
     a_tps: list[float] = []; b_tps: list[float] = []
     a_itl: list[float] = []; b_itl: list[float] = []
     batched = False
+    n_failed = 0
 
     def med(samples):
         return float(np.median(samples)) if samples else None
 
     async def call(ep, p, msgs):
-        return await stream_chat(ep, model, msgs, max_tokens=p.max_tokens,
-                                 temperature=cfg.effective_temp(), top_p=cfg.top_p,
-                                 top_k=cfg.top_k, seed=cfg.seed, timeout=cfg.timeout_s)
+        # A null A/B (same endpoint for a and b) gets a's key for both calls —
+        # correct when the box is one server, and the keys are equal when they
+        # are not.
+        key = api_key_a if ep == endpoint_a else api_key_b
+        r = await stream_chat(ep, model, msgs, max_tokens=p.max_tokens,
+                             temperature=cfg.effective_temp(), top_p=cfg.top_p,
+                             top_k=cfg.top_k, seed=cfg.seed, timeout=cfg.timeout_s,
+                             api_key=key)
+        if not r.ok:
+            # A pair only counts when BOTH calls succeed, so a mis-keyed
+            # endpoint 401s every call and the sweep would otherwise end as a
+            # silent "pairs: 0". Surface each failure like the sibling phases.
+            nonlocal n_failed
+            n_failed += 1
+            log(f"  ! {ep}: {r.error}")
+        return r
 
     for i in range(cfg.warmup):
         p = flat[i % len(flat)]
@@ -210,6 +229,16 @@ async def paired_ab(endpoint_a: str, endpoint_b: str, model: str,
                 break
 
     tps = paired_compare(a_tps, b_tps, "decode_tps", cfg.conf, higher_is_better=True)
+    if not a_tps and n_failed:
+        log(f"[ab] no pairs survived: {n_failed} failed calls "
+            f"(a pair counts only when both succeed) — see errors above")
+    # Distinct corner: every call 200d but none had pairable data (e.g. a
+    # server that emits one-chunk/batched updates) — pairs: 0 with zero
+    # failures above only said "pairs: 0".
+    if not a_tps and not n_failed and cfg.ab_max_pairs > 0:
+        log("[ab] no pairs survived: all calls succeeded but none had "
+            "pairable gap/throughput data (check the server's streaming "
+            "shape — e.g. batched updates)")
     gap_metric = "update_gap_median_ms" if batched else "itl_median_ms"
     itl = paired_compare(a_itl, b_itl, gap_metric, cfg.conf,
                          higher_is_better=False)

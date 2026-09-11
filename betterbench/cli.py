@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from .metrics import paired_compare
 from .html_report import render_html
 from .report import render_ab_markdown, render_markdown, sample_gate
 from .runner import concurrency_sweep, paired_ab, prefill_sweep, single_stream
+from .runs import allocate_run_dir, plan_run_dir
 
 
 # `--quick` preset: a short smoke run, not a publishable measurement.
@@ -52,6 +54,27 @@ def _load(cfg_path, overrides: dict) -> Config:
     return cfg
 
 
+def _atomic_write(path: str | Path, text: str) -> None:
+    """Write `text` to `path`: a temp file in the same directory, fsync'd,
+    then renamed onto the target. A run that dies mid-write therefore
+    leaves neither a half-written file — the target is either old or
+    complete new, never part of both — nor a stray temp file: the temp is
+    cleaned up on failure.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _html_path(out: str, html_out: str | None) -> Path:
     return Path(html_out) if html_out else Path(out).with_suffix(".html")
 
@@ -60,9 +83,8 @@ def _emit_html(results: dict, out: str, html_out: str | None, disabled: bool) ->
     """Write the standalone HTML report beside the results JSON."""
     if disabled:
         return
+    _atomic_write(_html_path(out, html_out), render_html(results))
     path = _html_path(out, html_out)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_html(results), encoding="utf-8")
     print(f"\nwrote {path}  —  open it in a browser for the charted report:")
     print(f"    file://{path.resolve()}")
 
@@ -95,6 +117,17 @@ def _phase_overrides(args) -> dict:
             "run_concurrency": False if args.no_concurrency else None}
 
 
+def _api_key(flag_value: str | None) -> str | None:
+    """Flag first, then the env var — so the key can stay out of shell history."""
+    return flag_value or os.environ.get("BETTERBENCH_API_KEY") or None
+
+
+def _resolve_out(explicit: str | None, model: str, name: str | None, fname: str) -> Path:
+    """Explicit --out wins; otherwise a fresh, versioned dir under
+    $BETTERBENCH_HOME (default ~/.betterbench)/runs/ — never the cwd."""
+    return Path(explicit) if explicit else allocate_run_dir(model, name) / fname
+
+
 def cmd_run(args):
     # --passes wins over the config file; --quick only fills in what wasn't asked
     # for explicitly, so `--quick --warmup 3` keeps the 3 warmups you asked for.
@@ -102,6 +135,11 @@ def cmd_run(args):
     if args.quick:
         passes = QUICK_PASSES if passes is None else passes
         warmup = QUICK_WARMUP if warmup is None else warmup
+
+    # The run directory is allocated at *write time* (see `out = _resolve_out`
+    # below), not here: every validation that can `sys.exit` (config, phases,
+    # corpus) must run first, so a failed run leaves no empty directory behind.
+    api_key = _api_key(args.api_key)
 
     cfg = _load(args.config, {
         "runs_per_category": passes, "warmup": warmup,
@@ -133,6 +171,14 @@ def cmd_run(args):
                    f"in {len(corpus)} categories")
     print(banner)
     print(f"phases: {', '.join(phases)}")
+    if args.out:
+        print(f"output: {args.out}")
+    else:
+        # the default run directory's *name*, without creating it: allocation
+        # happens when the results are written, and `wrote ...` below prints
+        # the exact name (a same-second collision would earn a -2 suffix).
+        planned = plan_run_dir(args.model, args.name) / "results.json"
+        print(f"output: {planned}  (a fresh run dir; allocated when the results are written)")
     if cfg.run_single_stream:
         print(f"{cfg.warmup} warmup + {cfg.runs_per_category} measured passes per category"
               f"{'  (quick mode — smoke check, not a publishable result)' if args.quick else ''}")
@@ -154,7 +200,8 @@ def cmd_run(args):
     # so only the prefill sweep is worth an extra /v1/models round trip.
     max_ctx = cfg.max_model_len
     if cfg.run_prefill:
-        max_ctx = max_ctx or get_model_context(args.endpoint, args.model)
+        max_ctx = max_ctx or get_model_context(args.endpoint, args.model,
+                                                api_key=api_key)
         if max_ctx:
             print(f"model max context: {max_ctx} tokens"
                   f"{'' if cfg.max_model_len else ' (auto-detected from /v1/models)'}")
@@ -165,48 +212,56 @@ def cmd_run(args):
 
     if cfg.run_single_stream:
         results["single_stream"] = asyncio.run(
-            single_stream(args.endpoint, args.model, corpus, cfg))
+            single_stream(args.endpoint, args.model, corpus, cfg, api_key=api_key))
     if cfg.run_prefill:
         results["prefill"] = asyncio.run(
-            prefill_sweep(args.endpoint, args.model, cfg, max_ctx=max_ctx))
+            prefill_sweep(args.endpoint, args.model, cfg, max_ctx=max_ctx,
+                          api_key=api_key))
     if cfg.run_concurrency:
         results["concurrency"] = asyncio.run(
-            concurrency_sweep(args.endpoint, args.model, corpus, cfg))
+            concurrency_sweep(args.endpoint, args.model, corpus, cfg,
+                              api_key=api_key))
 
     # Persist which percentiles are under-sampled, so the report's footnote is
     # a recorded fact rather than a claim recomputed at render time.
     results["sample_gate"] = sample_gate(results)
 
-    Path(args.out).write_text(json.dumps(results, indent=2))
-    print(f"\nwrote {args.out}")
+    # Allocate the run directory now — after validation and after the hours
+    # of measurement — so nothing that can abort the run has pre-created it,
+    # and write the results atomically.
+    out = _resolve_out(args.out, args.model, args.name, "results.json")
+    _atomic_write(out, json.dumps(results, indent=2))
+    print(f"\nwrote {out}")
     print(render_markdown(results))
-    _emit_html(results, args.out, args.html_out, args.no_html)
+    _emit_html(results, str(out), args.html_out, args.no_html)
 
 
 def cmd_report(args):
     results = json.loads(Path(args.results).read_text())
     if args.html:
+        _atomic_write(_html_path(args.results, args.out), render_html(results))
         path = _html_path(args.results, args.out)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render_html(results), encoding="utf-8")
         print(f"wrote {path}")
         print(f"    file://{path.resolve()}")
         return
     md = render_markdown(results)
     if args.out:
-        Path(args.out).write_text(md)
+        _atomic_write(args.out, md)
         print(f"wrote {args.out}")
     else:
         print(md)
 
 
 def cmd_ab(args):
+    key_a = _api_key(args.api_key_a)
+    key_b = _api_key(args.api_key_b)
     cfg = _load(args.config, {
         "greedy": True if not args.sampled else None,   # A/B defaults to greedy
         "target_mde_pct": args.mde, "ab_max_pairs": args.max_pairs, "seed": args.seed,
     })
     corpus = load_corpus(args.corpus, args.categories)
-    ab = asyncio.run(paired_ab(args.endpoint_a, args.endpoint_b, args.model, corpus, cfg))
+    ab = asyncio.run(paired_ab(args.endpoint_a, args.endpoint_b, args.model, corpus,
+                               cfg, api_key_a=key_a, api_key_b=key_b))
     # An A/B result that doesn't record which box, which GPU or which day it ran
     # is not archivable — and A/B is this tool's headline claim.
     ab = {"schema": RESULTS_SCHEMA, "betterbench_version": __version__,
@@ -216,8 +271,11 @@ def cmd_ab(args):
                               "endpoint_b": args.endpoint_b,
                               "notes": dict(args.note or [])}),
           **ab}
-    if args.out:
-        Path(args.out).write_text(json.dumps(ab, indent=2))
+    # The run directory is allocated at write time (see cmd_run's comment):
+    # nothing before this point may pre-create it.
+    out = _resolve_out(args.out, args.model, args.name, "ab.json")
+    _atomic_write(out, json.dumps(ab, indent=2))
+    print(f"wrote {out}")
     print(render_ab_markdown(ab))
 
 
@@ -290,9 +348,19 @@ def main(argv=None):
     r.add_argument("--max-model-len", type=int,
                    help="model context window in tokens; overrides auto-detection. "
                         "Prefill depths that don't fit are skipped instead of erroring.")
+    r.add_argument("--api-key", default=None,
+                   help="sent as 'Authorization: Bearer KEY' to the endpoint "
+                        "(or $BETTERBENCH_API_KEY); used on the wire only, "
+                        "never recorded in results.json")
+    r.add_argument("--name", default=None,
+                   help="label for the default run directory, after the timestamp "
+                        "(default: the model name)")
     r.add_argument("--note", action="append", type=_kv, metavar="KEY=VALUE",
                    help='free-form metadata recorded in results.json, e.g. --note image=v0.9.3 --note quant=mxfp4 --note tp=2. Repeatable. These are the details that decide whether two results are comparable at all, and there was no way to record them.')
-    r.add_argument("--out", default="results/run.json")
+    r.add_argument("--out", default=None,
+                   help="explicit output path; default: a versioned directory "
+                        "under $BETTERBENCH_HOME (default ~/.betterbench)/runs/ — "
+                        "results.json plus the HTML report, nothing in the cwd")
     r.add_argument("--no-html", action="store_true",
                    help="skip the standalone HTML report (written beside --out by default)")
     r.add_argument("--html-out", help="path for the HTML report (default: --out with .html)")
@@ -312,9 +380,20 @@ def main(argv=None):
     ab.add_argument("--max-pairs", type=int, default=200)
     ab.add_argument("--seed", type=int)
     ab.add_argument("--sampled", action="store_true", help="keep sampling (default greedy)")
+    ab.add_argument("--api-key-a", default=None,
+                    help="'Authorization: Bearer KEY' for endpoint A "
+                         "(or $BETTERBENCH_API_KEY)")
+    ab.add_argument("--api-key-b", default=None,
+                    help="'Authorization: Bearer KEY' for endpoint B "
+                         "(or $BETTERBENCH_API_KEY)")
+    ab.add_argument("--name", default=None,
+                    help="label for the default run directory, after the timestamp")
     ab.add_argument("--note", action="append", type=_kv, metavar="KEY=VALUE",
                     help="free-form metadata recorded in the A/B JSON (repeatable)")
-    ab.add_argument("--out")
+    ab.add_argument("--out", default=None,
+                    help="explicit output path; default: a versioned directory "
+                         "under $BETTERBENCH_HOME (default ~/.betterbench)/runs/ "
+                         "(ab.json)")
     ab.set_defaults(func=cmd_ab)
 
     cmp = sub.add_parser("compare", help="offline compare two results.json")
@@ -322,7 +401,12 @@ def main(argv=None):
     cmp.set_defaults(func=cmd_compare)
 
     args = p.parse_args(argv)
-    Path(getattr(args, "out", "results/x") or "results/x").parent.mkdir(parents=True, exist_ok=True)
+    # Only an explicit --out pre-creates its directory; the default run
+    # directories are created at write time (a run that dies in validation
+    # leaves nothing), and report/compare without --out write nothing
+    # (a stray `results/x/` in the cwd used to be created for them).
+    if getattr(args, "out", None):
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     args.func(args)
 
 

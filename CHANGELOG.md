@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Runs live in `~/.betterbench/runs/`, each in its own versioned directory
+
+`run` (and `ab`, which now saves by default) no longer writes `results/run.json`
+into the directory you ran it in. Without `--out`, each run gets its own
+directory under `~/.betterbench/runs/` — `$BETTERBENCH_HOME/runs/` when that
+variable is set — named `<YYYYMMDD-HHMMSS>-<label>` where the label is the model
+name (`--name mxfp4-flip` to call it something else): `results.json` plus the
+HTML report together, `ab.json` for A/B. A second run in the same second appends
+`-2`, so re-running can never overwrite an earlier result, and `--out PATH`
+always still wins for scripts. `report`/`compare` no longer create a stray
+`results/x/` in the working directory.
+
+### Authentication: `--api-key` / `--api-key-a` / `--api-key-b`
+
+Requests went out unauthorised, which is right for a local vLLM/llama.cpp
+server but wrong behind a gateway. A key sent on the wire as
+`Authorization: Bearer KEY` now authenticates every request — including the
+`/v1/models` context probe, which previously would have 401'd and read as
+"unknown max context" — and is **never recorded** in the results, so the
+JSON stays shareable. `export BETTERBENCH_API_KEY=...` fills in for any
+missing key flag, keeping it out of shell history.
+
 ### `PP t/s` is gone from the single-stream table
 
 The single-stream phase reported a per-category `PP t/s (med)` — prompt tokens ÷ TTFT over the
