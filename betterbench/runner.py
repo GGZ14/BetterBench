@@ -232,6 +232,13 @@ async def paired_ab(endpoint_a: str, endpoint_b: str, model: str,
     if not a_tps and n_failed:
         log(f"[ab] no pairs survived: {n_failed} failed calls "
             f"(a pair counts only when both succeed) — see errors above")
+    # Distinct corner: every call 200d but none had pairable data (e.g. a
+    # server that emits one-chunk/batched updates) — pairs: 0 with zero
+    # failures above only said "pairs: 0".
+    if not a_tps and not n_failed:
+        log("[ab] no pairs survived: all calls succeeded but none had "
+            "pairable gap/throughput data (check the server's streaming "
+            "shape — e.g. batched updates)")
     gap_metric = "update_gap_median_ms" if batched else "itl_median_ms"
     itl = paired_compare(a_itl, b_itl, gap_metric, cfg.conf,
                          higher_is_better=False)

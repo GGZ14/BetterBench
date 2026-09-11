@@ -130,3 +130,32 @@ def test_ab_with_a_miskeyed_endpoint_logs_the_401(server):
     assert ab["pairs"] == 0
     assert any("401" in line for line in lines), f"no log line surfaces the 401: {lines}"
     assert any("no pairs" in line for line in lines)
+    # mutual exclusivity: with failed calls, the unpairable shape line must not appear
+    assert not any("all calls succeeded" in line for line in lines)
+
+
+def test_ab_with_every_call_succeeding_but_unpairable_logs_its_summary(server):
+    """Every call 200s but the server streams a shape with nothing pairable
+    behind the 200 (one chunk per response: no update gaps and no decode
+    t/s can be computed, e.g. a server that emits its answer in a single
+    batched update). n_failed stays 0, so the failed-calls summary must not
+    fire — this corner needs its own distinct end-of-sweep line."""
+    import asyncio
+
+    from betterbench.config import Config
+    from betterbench.corpus import load_corpus
+    from betterbench.runner import paired_ab
+
+    # tokens=1: the mock 200s with exactly one content chunk per request —
+    # nothing pairable, no failure, no mock change needed.
+    url_a = server(tokens=1)
+    url_b = server(tokens=1)
+    corpus = load_corpus(categories=["reasoning"])
+    cfg = Config(warmup=0, ab_min_pairs=1, ab_max_pairs=1)
+    lines: list[str] = []
+    ab = asyncio.run(paired_ab(url_a, url_b, "mock", corpus, cfg,
+                               log=lines.append))
+    assert ab["pairs"] == 0
+    assert not any("failed" in line.lower() for line in lines), \
+        f"a 200-only sweep must not log failures: {lines}"
+    assert any("all calls succeeded" in line for line in lines)
