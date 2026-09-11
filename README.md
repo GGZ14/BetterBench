@@ -83,10 +83,12 @@ ls ~/.betterbench/runs/
 #    20260211-091234-qwen3-8/  20260211-110402-qwen3-8-2/  20260212-080101-mxfp4-flip/  ...
 ```
 
-The directory name is a timestamp plus a label — the model name by default,
-`--name mxfp4-flip` to call a run what it is — so entries sort by time and
-`ls` reads like a changelog. A second run in the same second appends `-2`;
-collisions never clobber. A run directory holds that run's `results.json` and
+The directory name is a start timestamp plus a label — the model name by
+default, `--name mxfp4-flip` to call a run what it is — so entries sort by time
+and `ls` reads like a changelog. A second run in the same second appends `-2`;
+collisions never clobber. The directory is created before the measuring starts
+and its path printed in the opening banner, so a run knows where it is going
+before it spends the hours getting there. A run directory holds that run's `results.json` and
 the charted HTML report beside it, and `ab` writes its `ab.json` the same way,
 so history accumulates instead of churning:
 

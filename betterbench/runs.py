@@ -4,10 +4,10 @@ Every run lands in its own directory under `~/.betterbench/runs/`
 (`$BETTERBENCH_HOME/runs/` when the variable is set), named
 `<YYYYMMDD-HHMMSS><-slug>` where the slug is the model name sanitised
 (`Qwen3-30B-A3B-instruct` -> `qwen3-30b-a3b-instruct`) or a caller-supplied
-`--name` label. The directory is created when it is *allocated* (at the
-moment the results are about to be written — validation failures before
-then leave nothing on disk), and no two runs ever collide: a second run
-within the same second gets `-2`, `-3`, ... on the end instead of
+`--name` label. The directory is created when it is *allocated* (once the run
+has cleared validation and is about to start measuring — a run that fails
+before then leaves nothing on disk), and no two runs ever collide: a second
+run within the same second gets `-2`, `-3`, ... on the end instead of
 overwriting. `plan_run_dir` gives the same name with no filesystem effect.
 
 An explicit `--out` bypasses this module entirely.
@@ -21,6 +21,14 @@ import sys
 import time
 import unicodedata
 from pathlib import Path
+
+
+def _now_stamp() -> str:
+    """The run directory's timestamp. Named so a test can freeze it without
+    monkeypatching `time.strftime` itself, which is the one the environment
+    fingerprint stamps results with."""
+    return time.strftime("%Y%m%d-%H%M%S")
+
 
 DEFAULT_HOME_NAME = ".betterbench"
 RUNS_SUBDIR = "runs"
@@ -73,7 +81,9 @@ def slug(text: str) -> str:
     if len(base) <= SLUG_MAX:
         return base
     tail = hashlib.sha256(base.encode("utf-8")).hexdigest()[:8]
-    return f"{base[:SLUG_MAX]}-{tail}"
+    # rstrip: the cap can land on a separator, and 'qwen3-30b--9a3c1f02' reads
+    # like a missing path element rather than a truncation.
+    return f"{base[:SLUG_MAX].rstrip('-')}-{tail}"
 
 
 def plan_run_dir(model: str, name: str | None = None) -> Path:
@@ -82,13 +92,12 @@ def plan_run_dir(model: str, name: str | None = None) -> Path:
     Returns the candidate location a `allocate_run_dir` call would take
     (same timestamp + slug, no collision suffix) — i.e. the "where the
     results go if nothing else got there first" answer. No filesystem side
-    effects: not even the `runs/` root is created, so a pre-run "output: "
-    banner can use it without risking an empty orphaned directory. It may
-    be one second behind (or, in a race, a `-2` off) the write-time
-    allocation; the final "wrote ..." line always shows the exact name.
+    effects: not even the `runs/` root is created. It may be one second behind
+    (or, in a race, a `-2` off) a later allocation, so a caller that needs the
+    real path allocates rather than planning.
     """
     root = betterbench_home() / RUNS_SUBDIR
-    stamp = time.strftime("%Y%m%d-%H%M%S")
+    stamp = _now_stamp()
     s = slug(name if name is not None else model)
     return root / (f"{stamp}" + (f"-{s}" if s else ""))
 
@@ -101,14 +110,16 @@ def allocate_run_dir(model: str, name: str | None = None) -> Path:
     collision (same second, same label) appends `-2`, `-3`, ... — it never
     reuses an existing path.
 
-    Call this at the moment the results are about to be written, not at the
-    start of a run that is hours away: a run that dies in validation (bad
-    --config, no corpus) must not leave an empty directory behind.
+    Call this once the run is committed to measuring — after the validation
+    that can `sys.exit` (bad --config, no corpus), so a run that never took a
+    measurement leaves no empty directory behind, but before the measuring
+    itself, so an unwritable destination is found in the first second rather
+    than after hours of work that then has nowhere to go.
     """
-    root = plan_run_dir(model, name).parent
+    candidate = plan_run_dir(model, name)
+    root, base = candidate.parent, candidate.name
     root.mkdir(parents=True, exist_ok=True)
-    base = plan_run_dir(model, name).name
-    d = root / base
+    d = candidate
     n = 2
     while True:
         try:

@@ -17,7 +17,7 @@ from .metrics import paired_compare
 from .html_report import render_html
 from .report import render_ab_markdown, render_markdown, sample_gate
 from .runner import concurrency_sweep, paired_ab, prefill_sweep, single_stream
-from .runs import allocate_run_dir, plan_run_dir
+from .runs import allocate_run_dir
 
 
 # `--quick` preset: a short smoke run, not a publishable measurement.
@@ -83,8 +83,8 @@ def _emit_html(results: dict, out: str, html_out: str | None, disabled: bool) ->
     """Write the standalone HTML report beside the results JSON."""
     if disabled:
         return
-    _atomic_write(_html_path(out, html_out), render_html(results))
     path = _html_path(out, html_out)
+    _atomic_write(path, render_html(results))
     print(f"\nwrote {path}  —  open it in a browser for the charted report:")
     print(f"    file://{path.resolve()}")
 
@@ -136,9 +136,6 @@ def cmd_run(args):
         passes = QUICK_PASSES if passes is None else passes
         warmup = QUICK_WARMUP if warmup is None else warmup
 
-    # The run directory is allocated at *write time* (see `out = _resolve_out`
-    # below), not here: every validation that can `sys.exit` (config, phases,
-    # corpus) must run first, so a failed run leaves no empty directory behind.
     api_key = _api_key(args.api_key)
 
     cfg = _load(args.config, {
@@ -171,14 +168,6 @@ def cmd_run(args):
                    f"in {len(corpus)} categories")
     print(banner)
     print(f"phases: {', '.join(phases)}")
-    if args.out:
-        print(f"output: {args.out}")
-    else:
-        # the default run directory's *name*, without creating it: allocation
-        # happens when the results are written, and `wrote ...` below prints
-        # the exact name (a same-second collision would earn a -2 suffix).
-        planned = plan_run_dir(args.model, args.name) / "results.json"
-        print(f"output: {planned}  (a fresh run dir; allocated when the results are written)")
     if cfg.run_single_stream:
         print(f"{cfg.warmup} warmup + {cfg.runs_per_category} measured passes per category"
               f"{'  (quick mode — smoke check, not a publishable result)' if args.quick else ''}")
@@ -210,6 +199,16 @@ def cmd_run(args):
                   "(pass --max-model-len to skip up front)")
     results["env"]["max_model_len"] = max_ctx
 
+    # Settle the destination here, before the measuring starts. Every check that
+    # can abort a run without measuring anything — phases, corpus — is already
+    # behind us, so a run that dies in validation still leaves no empty
+    # directory. Allocating *after* the sweeps instead cost two things: an
+    # unwritable $BETTERBENCH_HOME or a full disk was discovered only once the
+    # measurement was done and no longer recoverable, and the directory's
+    # timestamp recorded when a run finished rather than when it started.
+    out = _resolve_out(args.out, args.model, args.name, "results.json")
+    print(f"output: {out}")
+
     if cfg.run_single_stream:
         results["single_stream"] = asyncio.run(
             single_stream(args.endpoint, args.model, corpus, cfg, api_key=api_key))
@@ -226,10 +225,6 @@ def cmd_run(args):
     # a recorded fact rather than a claim recomputed at render time.
     results["sample_gate"] = sample_gate(results)
 
-    # Allocate the run directory now — after validation and after the hours
-    # of measurement — so nothing that can abort the run has pre-created it,
-    # and write the results atomically.
-    out = _resolve_out(args.out, args.model, args.name, "results.json")
     _atomic_write(out, json.dumps(results, indent=2))
     print(f"\nwrote {out}")
     print(render_markdown(results))
@@ -239,8 +234,8 @@ def cmd_run(args):
 def cmd_report(args):
     results = json.loads(Path(args.results).read_text())
     if args.html:
-        _atomic_write(_html_path(args.results, args.out), render_html(results))
         path = _html_path(args.results, args.out)
+        _atomic_write(path, render_html(results))
         print(f"wrote {path}")
         print(f"    file://{path.resolve()}")
         return
@@ -260,20 +255,22 @@ def cmd_ab(args):
         "target_mde_pct": args.mde, "ab_max_pairs": args.max_pairs, "seed": args.seed,
     })
     corpus = load_corpus(args.corpus, args.categories)
+    # An A/B result that doesn't record which box, which GPU or which day it ran
+    # is not archivable — and A/B is this tool's headline claim. Built before the
+    # sweep rather than after it, so `env.timestamp` is when the comparison
+    # started, which is what `run` already records.
+    env = fingerprint(args.endpoint_a, args.model,
+                      {"categories": list(corpus.keys()),
+                       "endpoint_b": args.endpoint_b,
+                       "notes": dict(args.note or [])})
+    # Settle the destination before measuring — see cmd_run.
+    out = _resolve_out(args.out, args.model, args.name, "ab.json")
+    print(f"output: {out}")
     ab = asyncio.run(paired_ab(args.endpoint_a, args.endpoint_b, args.model, corpus,
                                cfg, api_key_a=key_a, api_key_b=key_b))
-    # An A/B result that doesn't record which box, which GPU or which day it ran
-    # is not archivable — and A/B is this tool's headline claim.
     ab = {"schema": RESULTS_SCHEMA, "betterbench_version": __version__,
           "corpus_version": CORPUS_VERSION, "config": cfg.as_dict(),
-          "env": fingerprint(args.endpoint_a, args.model,
-                             {"categories": list(corpus.keys()),
-                              "endpoint_b": args.endpoint_b,
-                              "notes": dict(args.note or [])}),
-          **ab}
-    # The run directory is allocated at write time (see cmd_run's comment):
-    # nothing before this point may pre-create it.
-    out = _resolve_out(args.out, args.model, args.name, "ab.json")
+          "env": env, **ab}
     _atomic_write(out, json.dumps(ab, indent=2))
     print(f"wrote {out}")
     print(render_ab_markdown(ab))

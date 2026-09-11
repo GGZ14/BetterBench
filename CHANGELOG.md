@@ -7,11 +7,14 @@
 `run` (and `ab`, which now saves by default) no longer writes `results/run.json`
 into the directory you ran it in. Without `--out`, each run gets its own
 directory under `~/.betterbench/runs/` — `$BETTERBENCH_HOME/runs/` when that
-variable is set — named `<YYYYMMDD-HHMMSS>-<label>` where the label is the model
-name (`--name mxfp4-flip` to call it something else): `results.json` plus the
-HTML report together, `ab.json` for A/B. A second run in the same second appends
-`-2`, so re-running can never overwrite an earlier result, and `--out PATH`
-always still wins for scripts. `report`/`compare` no longer create a stray
+variable is set — named `<YYYYMMDD-HHMMSS>-<label>` where the timestamp is when
+the run started and the label is the model name (`--name mxfp4-flip` to call it
+something else): `results.json` plus the HTML report together, `ab.json` for A/B.
+A second run in the same second appends `-2`, so re-running can never overwrite
+an earlier result, and `--out PATH` always still wins for scripts. The directory
+is allocated once the run clears validation and before it starts measuring, and
+its path is printed up front: a run that has nowhere to write fails in its first
+second rather than after hours of measurement it can no longer save. `report`/`compare` no longer create a stray
 `results/x/` in the working directory.
 
 ### Authentication: `--api-key` / `--api-key-a` / `--api-key-b`

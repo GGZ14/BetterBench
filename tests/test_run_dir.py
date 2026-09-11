@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from betterbench import cli
 from betterbench.cli import main
 from betterbench import runs as runs_mod
 
@@ -107,7 +108,7 @@ def test_slug_transliterates_unicode():
 
 def test_two_runs_in_one_second_do_not_collide(monkeypatch, tmp_path):
     monkeypatch.setenv("BETTERBENCH_HOME", str(tmp_path / "bb"))
-    monkeypatch.setattr(runs_mod.time, "strftime", lambda fmt, *a: "20260101-000000")
+    monkeypatch.setattr(runs_mod, "_now_stamp", lambda: "20260101-000000")
     first = runs_mod.allocate_run_dir("Qwen3.8")
     second = runs_mod.allocate_run_dir("Qwen3.8")
     assert first.name != second.name
@@ -119,7 +120,7 @@ def test_precreated_suffix_is_skipped_not_reused(monkeypatch, tmp_path):
     never be handed back (never reuses an existing path); the free -3 is
     taken instead."""
     monkeypatch.setenv("BETTERBENCH_HOME", str(tmp_path / "bb"))
-    monkeypatch.setattr(runs_mod.time, "strftime", lambda fmt, *a: "20260101-000000")
+    monkeypatch.setattr(runs_mod, "_now_stamp", lambda: "20260101-000000")
     runs_root = tmp_path / "bb" / "runs"
     runs_root.mkdir(parents=True)
     (runs_root / "20260101-000000-qwen3-8-2").mkdir()  # left by a prior run; -3 stays free
@@ -136,7 +137,7 @@ def test_concurrent_allocations_are_race_safe(monkeypatch, tmp_path):
     loser of mkdir(exist_ok=False) died with an uncaught
     FileExistsError."""
     monkeypatch.setenv("BETTERBENCH_HOME", str(tmp_path / "bb"))
-    monkeypatch.setattr(runs_mod.time, "strftime", lambda fmt, *a: "20260101-000000")
+    monkeypatch.setattr(runs_mod, "_now_stamp", lambda: "20260101-000000")
     names, errors = [], []
     lock = threading.Lock()
     rounds = 3
@@ -269,7 +270,7 @@ def test_plan_run_dir_names_without_creating(monkeypatch, tmp_path):
     creating anything — it's the pre-browser-preview of the write-time
     allocation, and must not have the same side effect."""
     monkeypatch.setenv("BETTERBENCH_HOME", str(tmp_path / "bb"))
-    monkeypatch.setattr(runs_mod.time, "strftime", lambda fmt, *a: "20260101-000000")
+    monkeypatch.setattr(runs_mod, "_now_stamp", lambda: "20260101-000000")
     p = runs_mod.plan_run_dir("Qwen3.8", "mxfp4-flip")
     assert p == tmp_path / "bb" / "runs" / "20260101-000000-mxfp4-flip"
     assert not p.parent.exists()              # not even the runs root
@@ -281,8 +282,68 @@ def test_plan_and_allocate_agree_name(monkeypatch, tmp_path):
     """What the preview promised, allocation will deliver (absent a race): same
     stamp + slug + no suffix when nothing exists yet."""
     monkeypatch.setenv("BETTERBENCH_HOME", str(tmp_path / "bb"))
-    monkeypatch.setattr(runs_mod.time, "strftime", lambda fmt, *a: "20260101-000000")
+    monkeypatch.setattr(runs_mod, "_now_stamp", lambda: "20260101-000000")
     plan = runs_mod.plan_run_dir("Qwen3.8")
     got = runs_mod.allocate_run_dir("Qwen3.8")
     assert got.name == plan.name             # no -2: nothing was pre-empting
     assert got.is_dir()
+
+
+def test_the_announced_output_path_is_the_one_written(server, tmp_path, monkeypatch,
+                                                      capsys):
+    """The run directory is allocated once, up front, so the path announced
+    before the sweeps is the path the results actually land in. Planning the
+    name at the start and allocating it at the end put a whole run's duration
+    between the two timestamps: a two-hour run announced `...-081900-qwen3-8/`
+    and wrote `...-101900-qwen3-8/`."""
+    stamps = iter(["20260101-000000", "20260101-235959"])
+    monkeypatch.setattr(runs_mod, "_now_stamp", lambda: next(stamps))
+    home = tmp_path / "bb"
+    _run_prefill(server, home, monkeypatch)
+
+    announced = [ln.split("output:", 1)[1].strip()
+                 for ln in capsys.readouterr().out.splitlines()
+                 if ln.startswith("output:")]
+    d = next(iter((home / "runs").iterdir()))
+    assert announced == [str(d / "results.json")]
+    # the stamp taken before the measuring, not a second one taken after it
+    assert d.name == "20260101-000000-mock"
+
+
+def test_an_unwritable_destination_fails_before_measuring(server, tmp_path, monkeypatch):
+    """A run with nowhere to write finds out in its first second. Allocating
+    after the sweeps meant a full disk or an unwritable $BETTERBENCH_HOME
+    surfaced only once the measurement was done — and the results, still only
+    in memory, died with the traceback."""
+    home = tmp_path / "bb"
+    home.mkdir()
+    (home / "runs").write_text("a file where the runs directory should be")
+    monkeypatch.setenv("BETTERBENCH_HOME", str(home))
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(json.dumps(FAST))
+
+    measured = []
+    monkeypatch.setattr(cli, "prefill_sweep",
+                        lambda *a, **k: measured.append("prefill"))
+    with pytest.raises(OSError):
+        main(["run", "--endpoint", server(), "--model", "mock",
+              "--config", str(cfg), "--prefill"])
+    assert measured == []
+
+
+def test_ab_settles_its_destination_before_measuring(server, tmp_path, monkeypatch):
+    """`ab` allocates its run directory before the sweep too, so an A/B with
+    nowhere to write fails before spending the pairs rather than after."""
+    home = tmp_path / "bb"
+    home.mkdir()
+    (home / "runs").write_text("a file where the runs directory should be")
+    monkeypatch.setenv("BETTERBENCH_HOME", str(home))
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(json.dumps({"warmup": 0, "ab_min_pairs": 1, "ab_max_pairs": 2}))
+
+    measured = []
+    monkeypatch.setattr(cli, "paired_ab", lambda *a, **k: measured.append("ab"))
+    with pytest.raises(OSError):
+        main(["ab", "--endpoint-a", server(), "--endpoint-b", server(),
+              "--model", "mock", "--config", str(cfg)])
+    assert measured == []
