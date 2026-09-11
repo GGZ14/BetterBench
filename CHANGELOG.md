@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
+
+**Upgrading:** prefill throughput may read *lower* than it did on 0.5.0, and
+that is the point. If your server reuses KV blocks by content — a per-layer
+LRU, say — the sweep was being served largely out of that cache and reporting
+the result as prompt processing. It no longer can. A drop here is the old
+number having been wrong, not a regression in the server. Runs also stop at
+concurrency 8 by default, so a 0.6.0 result and a 0.5.0 one will not have the
+same set of concurrency rows.
 
 ### The concurrency sweep stops at 8
 
