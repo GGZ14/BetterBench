@@ -22,7 +22,10 @@ class Config:
     run_single_stream: bool = True
 
     # concurrency sweep
-    concurrency_levels: list[int] = field(default_factory=lambda: [1, 2, 4, 8, 16])
+    # Stops at 8: past it the sweep costs a level's worth of time to answer a
+    # question few people are asking of a single box. Add 16, 32, ... in a
+    # --config file when the deployment actually runs that deep.
+    concurrency_levels: list[int] = field(default_factory=lambda: [1, 2, 4, 8])
     concurrency_requests: int = 48   # completed requests per level
     run_concurrency: bool = True
 

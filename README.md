@@ -172,7 +172,9 @@ is too thin a sample to publish or to compare stacks with; the pass count is pri
 banner and recorded in the report so a quick result can't be mistaken for a full one.
 
 **Concurrency sweep** — aggregate throughput and per-request TTFT/decode percentiles at
-increasing load, revealing the throughput/latency knee.
+increasing load, revealing the throughput/latency knee. Levels 1, 2, 4 and 8 by default;
+deeper is a `--config` file away (`"concurrency_levels": [1, 2, 4, 8, 16, 32]`), and
+each extra level costs its own pass of `concurrency_requests`.
 
 **Phases you can run one at a time** — `--decode` (single-stream, batch = 1), `--prefill`
 (the prompt-processing depth sweep) and `--concurrency` (the load sweep). Naming a phase runs

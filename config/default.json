@@ -7,7 +7,7 @@
   "runs_per_category": 20,
   "unique_nonce": true,
   "run_concurrency": true,
-  "concurrency_levels": [1, 2, 4, 8, 16],
+  "concurrency_levels": [1, 2, 4, 8],
   "concurrency_requests": 48,
   "weights": {
     "code": 0.30, "reasoning": 0.20, "prose": 0.15,

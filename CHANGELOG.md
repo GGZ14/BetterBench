@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### The concurrency sweep stops at 8
+
+The default levels are `[1, 2, 4, 8]`, no longer `[1, 2, 4, 8, 16]`. Level 16
+cost a fifth of the sweep's wall time to answer a question few people ask of a
+single box, and the knee it was there to find has usually shown itself by 8.
+Put it back — or go further — with `"concurrency_levels": [1, 2, 4, 8, 16, 32]`
+in a `--config` file. Results recorded at 16 still render; the report draws the
+levels the run actually contains.
+
 ### The prefill sweep no longer sends the same text twice
 
 The filler behind the nonce was one paragraph repeated to length, which a
