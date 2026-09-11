@@ -121,6 +121,24 @@ The key travels on the wire only: it is never written into the results, so a
 BETTERBENCH_API_KEY=...` fills in for any missing key flag, keeping it out of
 history where the flag would otherwise live.
 
+## Staying current
+
+BetterBench checks once a day whether a newer release has been tagged, and
+prints a line after the run if so — a benchmark a version behind can be
+measuring something the current release already fixed:
+
+```
+A newer BetterBench is available: v0.5.0 (running 0.4.0) — https://github.com/GGZ14/BetterBench/releases
+```
+
+The check runs on a background thread and is finished **before the first
+measured request**, so it is never on the wire while a request to the endpoint
+under test is being timed. Its answer is cached in
+`$BETTERBENCH_HOME/update-check.json` for 24 hours, so the ordinary invocation
+makes no network call at all, and every failure — offline, proxied, rate
+limited — is silence rather than an error. Switch it off with
+`--no-update-check` on any subcommand, or `BETTERBENCH_NO_UPDATE_CHECK=1`.
+
 ## What you get
 
 **Single-stream table** — per category: TTFT p50/p99, decode t/s median ± IQR, a weighted

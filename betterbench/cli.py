@@ -18,6 +18,7 @@ from .html_report import render_html
 from .report import render_ab_markdown, render_markdown, sample_gate
 from .runner import concurrency_sweep, paired_ab, prefill_sweep, single_stream
 from .runs import allocate_run_dir
+from . import update
 
 
 # `--quick` preset: a short smoke run, not a publishable measurement.
@@ -209,6 +210,10 @@ def cmd_run(args):
     out = _resolve_out(args.out, args.model, args.name, "results.json")
     print(f"output: {out}")
 
+    # Nothing of ours on the wire from here on: the next request timed is the
+    # one being measured.
+    update.settle()
+
     if cfg.run_single_stream:
         results["single_stream"] = asyncio.run(
             single_stream(args.endpoint, args.model, corpus, cfg, api_key=api_key))
@@ -266,6 +271,7 @@ def cmd_ab(args):
     # Settle the destination before measuring — see cmd_run.
     out = _resolve_out(args.out, args.model, args.name, "ab.json")
     print(f"output: {out}")
+    update.settle()                      # see cmd_run
     ab = asyncio.run(paired_ab(args.endpoint_a, args.endpoint_b, args.model, corpus,
                                cfg, api_key_a=key_a, api_key_b=key_b))
     ab = {"schema": RESULTS_SCHEMA, "betterbench_version": __version__,
@@ -304,9 +310,13 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="betterbench",
                                 description="Real-world LLM inference benchmark.")
     p.add_argument("--version", action="version", version=f"BetterBench {__version__}")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--no-update-check", action="store_true",
+                        help="don't check whether a newer BetterBench has been "
+                             "released (or set BETTERBENCH_NO_UPDATE_CHECK=1)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    r = sub.add_parser("run", help="benchmark one endpoint")
+    r = sub.add_parser("run", help="benchmark one endpoint", parents=[common])
     r.add_argument("--endpoint", required=True, help="OpenAI-compatible base, e.g. http://host:8080/v1")
     r.add_argument("--model", required=True)
     r.add_argument("--config"); r.add_argument("--corpus")
@@ -363,13 +373,13 @@ def main(argv=None):
     r.add_argument("--html-out", help="path for the HTML report (default: --out with .html)")
     r.set_defaults(func=cmd_run)
 
-    rep = sub.add_parser("report", help="render a results.json as markdown")
+    rep = sub.add_parser("report", help="render a results.json as markdown", parents=[common])
     rep.add_argument("results"); rep.add_argument("--out")
     rep.add_argument("--html", action="store_true",
                      help="render the standalone HTML report instead of markdown")
     rep.set_defaults(func=cmd_report)
 
-    ab = sub.add_parser("ab", help="interleaved paired A/B between two endpoints")
+    ab = sub.add_parser("ab", help="interleaved paired A/B between two endpoints", parents=[common])
     ab.add_argument("--endpoint-a", required=True); ab.add_argument("--endpoint-b", required=True)
     ab.add_argument("--model", required=True)
     ab.add_argument("--config"); ab.add_argument("--corpus"); ab.add_argument("--categories", nargs="*")
@@ -393,11 +403,15 @@ def main(argv=None):
                          "(ab.json)")
     ab.set_defaults(func=cmd_ab)
 
-    cmp = sub.add_parser("compare", help="offline compare two results.json")
+    cmp = sub.add_parser("compare", help="offline compare two results.json", parents=[common])
     cmp.add_argument("a"); cmp.add_argument("b")
     cmp.set_defaults(func=cmd_compare)
 
     args = p.parse_args(argv)
+    # Started before the work, reported after it: on a run that takes hours the
+    # answer is long since in, and a notice at the end is the one the user is
+    # still looking at.
+    update.start(disabled=args.no_update_check)
     # Only an explicit --out pre-creates its directory; the default run
     # directories are created at write time (a run that dies in validation
     # leaves nothing), and report/compare without --out write nothing
@@ -405,6 +419,9 @@ def main(argv=None):
     if getattr(args, "out", None):
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     args.func(args)
+    notice = update.notice()
+    if notice:
+        print(notice)
 
 
 if __name__ == "__main__":

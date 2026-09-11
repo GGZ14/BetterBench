@@ -20,6 +20,14 @@ sys.path.insert(0, str(ROOT / "tools"))
 from mock_server import make_handler  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_update_check(monkeypatch):
+    """No test reaches the network. The release check is off for every test
+    unless one turns it back on deliberately (tests/test_update_check.py),
+    which also keeps its cache out of the developer's real ~/.betterbench."""
+    monkeypatch.setenv("BETTERBENCH_NO_UPDATE_CHECK", "1")
+
+
 @pytest.fixture
 def server():
     """Factory: `server(ttft_ms=..., itl_ms=..., tokens=..., **knobs) -> base_url`."""

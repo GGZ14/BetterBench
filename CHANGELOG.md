@@ -27,6 +27,18 @@ server but wrong behind a gateway. A key sent on the wire as
 JSON stays shareable. `export BETTERBENCH_API_KEY=...` fills in for any
 missing key flag, keeping it out of shell history.
 
+### A newer release is announced when there is one
+
+BetterBench now checks once a day whether a newer version has been tagged and
+says so after the run, because a benchmark a version behind can be measuring
+something the current release already fixed. The check is on a background
+thread that is joined **before the first measured request** — it can never be
+on the wire while a request to the endpoint under test is being timed — its
+answer is cached in `$BETTERBENCH_HOME/update-check.json` for 24 hours, and
+every failure is silence rather than an error: it may never be the reason a
+benchmark did not run. `--no-update-check` or `BETTERBENCH_NO_UPDATE_CHECK=1`
+switches it off.
+
 ### `PP t/s` is gone from the single-stream table
 
 The single-stream phase reported a per-category `PP t/s (med)` — prompt tokens ÷ TTFT over the
