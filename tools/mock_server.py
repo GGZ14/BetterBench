@@ -19,7 +19,8 @@ def make_handler(ttft_ms: float, itl_ms: float, tokens: int, max_ctx: int = 0, *
                  tokens_per_chunk: int = 1, stall_every: int = 0,
                  stall_ms: float = 0.0, usage_extra_tokens: int = 0,
                  no_usage: bool = False, reasoning: str = "off",
-                 reasoning_tokens: int = 0, finish_reason: str = "stop"):
+                 reasoning_tokens: int = 0, finish_reason: str = "stop",
+                 api_key: str | None = None):
     """Build the request handler.
 
     Beyond the fixed-timing defaults (one token per chunk, which is what the
@@ -36,6 +37,9 @@ def make_handler(ttft_ms: float, itl_ms: float, tokens: int, max_ctx: int = 0, *
       reasoning           "channel" (reasoning_content deltas) or "inline"
                           (a literal <think>...</think> inside content)
       finish_reason       force "length" for the truncated-mid-thought path
+      api_key             if set, requests without a matching
+                          'Authorization: Bearer <key>' header get an HTTP 401,
+                          the way a gateway in front of a real server would respond
     """
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -43,7 +47,30 @@ def make_handler(ttft_ms: float, itl_ms: float, tokens: int, max_ctx: int = 0, *
         def log_message(self, *a):  # silence
             pass
 
+        def _preauthorized(self) -> bool:
+            return api_key is None or \
+                self.headers.get("Authorization") == "Bearer " + api_key
+
+        def _unauthorized(self):
+            err = json.dumps({"error": {"message": "Invalid or missing API key",
+                                        "type": "AuthenticationError", "code": 401}}).encode()
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Connection", "close")
+            self.send_header("Content-Length", str(len(err)))
+            self.end_headers()
+            self.close_connection = True
+            if self.wfile.closed:
+                return
+            try:
+                self.wfile.write(err)
+            except OSError:            # client already gone; nothing to report on
+                pass
+
         def do_GET(self):
+            if not self._preauthorized():
+                self._unauthorized()
+                return
             if self.path.rstrip("/").endswith("/v1/models"):
                 entry = {"id": "mock"}
                 if max_ctx:                      # advertise context like vLLM does
@@ -58,6 +85,9 @@ def make_handler(ttft_ms: float, itl_ms: float, tokens: int, max_ctx: int = 0, *
                 self.send_error(404)
 
         def do_POST(self):
+            if not self._preauthorized():
+                self._unauthorized()
+                return
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
             n = min(int(body.get("max_tokens", tokens)), tokens)

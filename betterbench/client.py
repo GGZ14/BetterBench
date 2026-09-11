@@ -318,12 +318,22 @@ def _build_payload(model, messages, *, max_tokens, temperature, top_p, top_k,
     return p
 
 
+def _request_headers(api_key: str | None) -> dict[str, str]:
+    """Headers for every request; a key travels on the wire only and is never
+    recorded in any result this tool writes (the endpoint IS recorded, and a
+    gateway behind it does not change when the key does)."""
+    h = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+    if api_key:
+        h["Authorization"] = "Bearer " + api_key
+    return h
+
+
 def stream_chat_sync(base_url: str, model: str, messages: list[dict], *,
                      max_tokens: int, temperature: float, top_p: float = 0.95,
                      top_k: int | None = 20, seed: int | None = None,
                      category: str = "", prompt_id: str = "",
                      extra_body: dict | None = None,
-                     timeout: float = 600.0) -> RunResult:
+                     timeout: float = 600.0, api_key: str | None = None) -> RunResult:
     url = base_url.rstrip("/") + "/chat/completions"
     u = urllib.parse.urlparse(url)
     payload = _build_payload(model, messages, max_tokens=max_tokens,
@@ -340,7 +350,7 @@ def stream_chat_sync(base_url: str, model: str, messages: list[dict], *,
     try:
         path = u.path + (("?" + u.query) if u.query else "")
         conn.request("POST", path, json.dumps(payload),
-                     {"Content-Type": "application/json", "Accept": "text/event-stream"})
+                     _request_headers(api_key))
         resp = conn.getresponse()
         if resp.status != 200:
             res.error = f"HTTP {resp.status}: {resp.read()[:300].decode('utf-8','replace')}"
@@ -393,7 +403,7 @@ async def stream_chat(base_url: str, model: str, messages: list[dict],
 
 
 def get_model_context(base_url: str, model: str,
-                      timeout: float = 5.0) -> int | None:
+                      timeout: float = 5.0, api_key: str | None = None) -> int | None:
     """Best-effort probe of the model's max context window via GET /v1/models.
 
     vLLM (and several other OpenAI-compatible servers) expose `max_model_len`
@@ -408,7 +418,8 @@ def get_model_context(base_url: str, model: str,
     try:
         conn = ConnCls(u.hostname, u.port or (443 if u.scheme == "https" else 80),
                        timeout=timeout)
-        conn.request("GET", u.path + (("?" + u.query) if u.query else ""))
+        conn.request("GET", u.path + (("?" + u.query) if u.query else ""),
+                     headers=_request_headers(api_key))
         resp = conn.getresponse()
         if resp.status != 200:
             conn.close()
@@ -441,7 +452,7 @@ def is_context_length_error(err: str | None) -> bool:
             or "please reduce" in e)
 
 
-def ping(base_url: str, timeout: float = 3.0) -> bool:
+def ping(base_url: str, timeout: float = 3.0, api_key: str | None = None) -> bool:
     url = base_url.rstrip("/") + "/models"
     u = urllib.parse.urlparse(url)
     ConnCls = (http.client.HTTPSConnection if u.scheme == "https"
@@ -449,7 +460,8 @@ def ping(base_url: str, timeout: float = 3.0) -> bool:
     try:
         conn = ConnCls(u.hostname, u.port or (443 if u.scheme == "https" else 80),
                        timeout=timeout)
-        conn.request("GET", u.path + (("?" + u.query) if u.query else ""))
+        conn.request("GET", u.path + (("?" + u.query) if u.query else ""),
+                     headers=_request_headers(api_key))
         ok = conn.getresponse().status == 200
         conn.close()
         return ok

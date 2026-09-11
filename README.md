@@ -34,10 +34,18 @@ pip install -e .          # editable install works out of the box; needs Python 
 ## Quickstart
 
 ```bash
-# Benchmark one endpoint (single-stream, prefill and concurrency sweeps) and print
-# the report
+# Benchmark one endpoint (single-stream, prefill and concurrency sweeps).
+# Without --out the result lands in a versioned run directory under
+# ~/.betterbench/runs/ — see [Where runs live](#where-runs-live)
+betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8
+
+# …or keep it in a specific place — an explicit --out always wins
 betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 \
                 --out results/radiance-27b.json
+
+# A gateway in front of the server wants a Bearer key
+betterbench run --endpoint https://gateway.internal/v1 --model qwen3-8 \
+                --api-key "$GATEWAY_KEY"            # or export BETTERBENCH_API_KEY
 
 # Re-render a saved result later (markdown to stdout, or a charted HTML page)
 betterbench report results/radiance-27b.json
@@ -59,6 +67,56 @@ betterbench run --endpoint http://192.168.12.47:8080/v1 --model Qwen3.8 \
 betterbench ab --endpoint-a http://host:8080/v1 --endpoint-b http://host:8081/v1 \
                --model Qwen3.8 --mde 1.0
 ```
+
+## Where runs live
+
+Without `--out`, a run writes into its **own versioned directory** under
+`~/.betterbench/runs/` (`$BETTERBENCH_HOME/runs/` when that variable is set) —
+nothing lands in the directory you ran it from, and re-running can never
+overwrite an earlier result:
+
+```bash
+betterbench run --endpoint ... --model Qwen3.8 --name mxfp4-flip
+# output: ~/.betterbench/runs/20260211-091234-mxfp4-flip/
+ls ~/.betterbench/runs/
+#    20260211-091234-qwen3-8/  20260211-110402-qwen3-8-2/  20260212-080101-mxfp4-flip/  ...
+```
+
+The directory name is a timestamp plus a label — the model name by default,
+`--name mxfp4-flip` to call a run what it is — so entries sort by time and
+`ls` reads like a changelog. A second run in the same second appends `-2`;
+collisions never clobber. A run directory holds that run's `results.json` and
+the charted HTML report beside it, and `ab` writes its `ab.json` the same way,
+so history accumulates instead of churning:
+
+```bash
+betterbench report ~/.betterbench/runs/20260211-091234-qwen3-8/results.json --html
+```
+
+`--out PATH` always wins over the default, and `BETTERBENCH_HOME` moves the
+base directory. (`betterbench report`/`compare` read whatever path you point
+them at and write nothing unless told to.)
+
+## Authentication
+
+A request goes out unauthorised by default — right for a local vLLM or
+llama.cpp server, but wrong once a gateway sits in front of the endpoint.
+`--api-key` sends the key as `Authorization: Bearer KEY` on every request,
+including the `/v1/models` context probe, which would otherwise 401 and read
+as "unknown max context":
+
+```bash
+betterbench run --endpoint https://gateway.internal/v1 --model qwen3-8 --api-key "..."
+
+# A/B boxes behind two gateways get per-endpoint keys
+betterbench ab --endpoint-a https://a.internal/v1 --endpoint-b https://b.internal/v1 \
+               --model qwen3.8 --api-key-a "$KEY_A" --api-key-b "$KEY_B"
+```
+
+The key travels on the wire only: it is never written into the results, so a
+`results.json` stays shareable however it was produced. `export
+BETTERBENCH_API_KEY=...` fills in for any missing key flag, keeping it out of
+history where the flag would otherwise live.
 
 ## What you get
 
