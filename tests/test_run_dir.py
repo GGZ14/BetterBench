@@ -91,6 +91,20 @@ def test_slug_caps_long_labels_with_a_sha_suffix():
     assert runs_mod.slug("q" * 64) == "q" * 64
 
 
+def test_slug_transliterates_unicode():
+    assert runs_mod.slug("Módèle-XL") == "modele-xl"
+    assert runs_mod.slug("Über-Übung (v2)") == "uber-ubung-v2"
+    assert runs_mod.slug("Módèle-XL (mx-fp8)") == "modele-xl-mx-fp8"
+    # cap + hash path still works on a >SLUG_MAX input that normalises
+    # from (longer) unicode text — 'é'*200 -> 'e'*200
+    long = runs_mod.slug("é" * 200)
+    assert long.startswith("e" * runs_mod.SLUG_MAX)
+    tail = long[len(long) - 8:]
+    assert len(long) == runs_mod.SLUG_MAX + 1 + len(tail)
+    int(tail, 16)                             # hex
+
+
+
 def test_two_runs_in_one_second_do_not_collide(monkeypatch, tmp_path):
     monkeypatch.setenv("BETTERBENCH_HOME", str(tmp_path / "bb"))
     monkeypatch.setattr(runs_mod.time, "strftime", lambda fmt, *a: "20260101-000000")

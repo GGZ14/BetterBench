@@ -19,6 +19,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 DEFAULT_HOME_NAME = ".betterbench"
@@ -57,13 +58,17 @@ def betterbench_home() -> Path:
 def slug(text: str) -> str:
     """Sanitise a model name or label into a path-safe, lowercase slug.
 
-    'Qwen3-30B / mx-FP8 (v2)' -> 'qwen3-30b-mx-fp8-v2'; '' if nothing remains.
+    'Qwen3-30B / mx-FP8 (v2)' -> 'qwen3-30b-mx-fp8-v2';
+    'Módèle-XL (mx-fp8)' -> 'modele-xl-mx-fp8'; '' if nothing remains.
+    Accented non-ASCII letters are transliterated (NFKD + ASCII) before any
+    sanitising, so 'Módèle' becomes 'modele' instead of 'm-d-le'.
     Capped to SLUG_MAX characters on the *sanitised* string so a name made
     of pure punctuation can't eat the cap; when truncated, an 8-char sha256
     prefix of the full sanitised slug is appended so distinct long labels
     collide only rarely. Readable by default, e.g.
     'qwen3-480b-instruct-9a3c1f02'.
     """
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     base = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     if len(base) <= SLUG_MAX:
         return base
