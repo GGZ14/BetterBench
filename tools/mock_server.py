@@ -52,6 +52,14 @@ def make_handler(ttft_ms: float, itl_ms: float, tokens: int, max_ctx: int = 0, *
                 self.headers.get("Authorization") == "Bearer " + api_key
 
         def _unauthorized(self):
+            # Drain the request body first. Answering 401 and closing on an
+            # unread body leaves the client writing into a socket nobody is
+            # reading: with a prefill-sized prompt it gets a connection reset
+            # instead of the 401 it is being tested against.
+            try:
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            except OSError:
+                pass
             err = json.dumps({"error": {"message": "Invalid or missing API key",
                                         "type": "AuthenticationError", "code": 401}}).encode()
             self.send_response(401)

@@ -318,14 +318,27 @@ def _build_payload(model, messages, *, max_tokens, temperature, top_p, top_k,
     return p
 
 
-def _request_headers(api_key: str | None) -> dict[str, str]:
-    """Headers for every request; a key travels on the wire only and is never
-    recorded in any result this tool writes (the endpoint IS recorded, and a
-    gateway behind it does not change when the key does)."""
-    h = {"Content-Type": "application/json", "Accept": "text/event-stream"}
-    if api_key:
-        h["Authorization"] = "Bearer " + api_key
-    return h
+def _auth_headers(api_key: str | None) -> dict[str, str]:
+    """The credential alone, when there is one — nothing about content type.
+
+    A key travels on the wire only and is never recorded in any result this
+    tool writes (the endpoint IS recorded, and a gateway behind it does not
+    change when the key does). Kept separate from content negotiation because
+    the two GET probes below want `Accept: application/json`, not the streaming
+    POST's `text/event-stream`: a gateway strict enough to enforce Accept —
+    exactly the deployment a Bearer key implies — would answer those 406, and
+    `get_model_context` reads any non-200 as "context window unknown".
+    """
+    return {"Authorization": "Bearer " + api_key} if api_key else {}
+
+
+def _stream_headers(api_key: str | None) -> dict[str, str]:
+    return {"Content-Type": "application/json", "Accept": "text/event-stream",
+            **_auth_headers(api_key)}
+
+
+def _json_headers(api_key: str | None) -> dict[str, str]:
+    return {"Accept": "application/json", **_auth_headers(api_key)}
 
 
 def stream_chat_sync(base_url: str, model: str, messages: list[dict], *,
@@ -350,7 +363,7 @@ def stream_chat_sync(base_url: str, model: str, messages: list[dict], *,
     try:
         path = u.path + (("?" + u.query) if u.query else "")
         conn.request("POST", path, json.dumps(payload),
-                     _request_headers(api_key))
+                     _stream_headers(api_key))
         resp = conn.getresponse()
         if resp.status != 200:
             res.error = f"HTTP {resp.status}: {resp.read()[:300].decode('utf-8','replace')}"
@@ -419,7 +432,7 @@ def get_model_context(base_url: str, model: str,
         conn = ConnCls(u.hostname, u.port or (443 if u.scheme == "https" else 80),
                        timeout=timeout)
         conn.request("GET", u.path + (("?" + u.query) if u.query else ""),
-                     headers=_request_headers(api_key))
+                     headers=_json_headers(api_key))
         resp = conn.getresponse()
         if resp.status != 200:
             conn.close()
@@ -461,7 +474,7 @@ def ping(base_url: str, timeout: float = 3.0, api_key: str | None = None) -> boo
         conn = ConnCls(u.hostname, u.port or (443 if u.scheme == "https" else 80),
                        timeout=timeout)
         conn.request("GET", u.path + (("?" + u.query) if u.query else ""),
-                     headers=_request_headers(api_key))
+                     headers=_json_headers(api_key))
         ok = conn.getresponse().status == 200
         conn.close()
         return ok

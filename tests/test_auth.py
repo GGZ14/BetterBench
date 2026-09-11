@@ -185,3 +185,28 @@ def test_ab_with_zero_pairs_attempted_logs_no_summary(server):
         f"a vacuous 0-pair config must log no summary: {lines}"
     assert not any("all calls succeeded" in line for line in lines)
     assert not any("failed" in line.lower() for line in lines)
+
+
+def test_the_models_probe_accepts_json_not_sse(server, monkeypatch):
+    """The context probe is a plain JSON GET, and says so. Advertising only
+    `text/event-stream` on it invites a 406 from a gateway strict enough to
+    enforce Accept — the very deployment a Bearer key implies — and
+    get_model_context reads any non-200 as "context window unknown"."""
+    seen = _spy_headers(monkeypatch)
+    assert get_model_context(server(max_ctx=4096), "mock", api_key=None) == 4096
+    assert seen, "no request went out"
+    assert all(h.get("accept") == "application/json" for h in seen), seen
+
+
+def test_the_chat_stream_still_accepts_sse(server, monkeypatch):
+    """The other half of the split: the streaming POST keeps its SSE Accept."""
+    seen = _spy_headers(monkeypatch)
+    _chat(server())
+    assert any(h.get("accept") == "text/event-stream" for h in seen), seen
+
+
+def test_the_bearer_header_rides_along_on_the_probe(server, monkeypatch):
+    """Splitting content negotiation off must not drop the credential."""
+    seen = _spy_headers(monkeypatch)
+    get_model_context(server(api_key=SEKRET, max_ctx=4096), "mock", api_key=SEKRET)
+    assert any(h.get("authorization") == "Bearer " + SEKRET for h in seen), seen
