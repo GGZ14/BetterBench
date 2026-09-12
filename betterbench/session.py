@@ -40,6 +40,11 @@ def _shape_ok(slug: str) -> bool:
     only *decodes* into one."""
     if not slug or slug.startswith("."):
         return False
+    # Note: slugs are *never* path-joined — the real security gate is
+    # the listed-directory-name match (a slug routes only if it equals
+    # a directory in `list_runs`), so don't trust this shape check
+    # alone; `".." not in slug.split("/")` is belt-and-braces (given
+    # the prior `/` check, the split would yield a single segment).
     return "/" not in slug and ".." not in slug.split("/")
 
 
@@ -62,7 +67,7 @@ def _run_js(slug: str) -> str:
         "  /* Keep A first, B second, exactly as the page header reads them. */\n"
         "  location = \"/pair?a=\" + curSlug + \"&b=\" + selC.value;\n"
         "}\n"
-        "selC.addEventListener('change', pairNav);\n"
+        "if (selC) selC.addEventListener('change', pairNav);\n"
         "/* (handled by the single select: A is always the current run.\n"
         "   A missing selection can't happen; the select always defaults to the\n"
         "   first other option and is never cleared.) */\n")
@@ -120,6 +125,13 @@ class _Handler(BaseHTTPRequestHandler):
             # contains a literal `%` (e.g. `a%2520b` → `a b`).
             qs = {k: v[0]
                  for k, v in urllib.parse.parse_qs(sp.query).items() if v}
+            # `parse_qs` (with the `if v` filter) drops absent *and*
+            # empty values, so `None` here means the parameter is
+            # entirely missing — that's the plain unknown-shape 404
+            # form, not a `no such run` one (no slugs to name):
+            if qs.get("a") is None or qs.get("b") is None:
+                self._send(404, "not found\n", _THE_404_PLAIN)
+                return
             for slug in (qs.get("a"), qs.get("b")):
                 bad = self._slug_404(slug, reportable, skipped)
                 if bad:
@@ -141,11 +153,11 @@ class _Handler(BaseHTTPRequestHandler):
         if _WRAP_TARGET in page:
             # Inject the session bar above the report header; when the
             # target were missing (impossible with the current template,
-            # guarded anyway) the unmodified page is served.
+            # guarded anyway) the unmodified page is served — the
+            # already-rendered `page` is reused as-is, and the
+            # script-gating below works off that unchanged string.
             page = page.replace(_WRAP_TARGET,
                                _WRAP_TARGET + bar + "\n", 1)
-        else:
-            page = render_html(entry.results)
         if "</body>" in page:
             page = page.replace("</body>",
                                "<script>\n" + _run_js(slug)

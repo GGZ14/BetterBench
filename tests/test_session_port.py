@@ -131,6 +131,23 @@ def test_unknown_slugs_are_404(tmp_path):
         srv.server_close()
 
 
+def test_missing_pair_param_is_plain_404(tmp_path):
+    _make_run(tmp_path, "20260101T000000-a", model="ma",
+             endpoint="http://a:1", greedy=True)
+    srv = session.make_server(tmp_path)
+    port = srv.server_address[1]
+    try:
+        code, body = _get(port, "/pair")
+        assert code == 404
+        assert body == "not found\n"
+
+        code, body = _get(port, "/pair?a=20260101T000000-a")
+        assert code == 404
+        assert body == "not found\n"
+    finally:
+        srv.server_close()
+
+
 def test_skipped_run_is_404_with_explanation(tmp_path):
     ab = tmp_path / "ab-only-2026"
     ab.mkdir()
