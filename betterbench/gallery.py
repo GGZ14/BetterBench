@@ -40,7 +40,8 @@ class RunEntry:
 
 def list_runs(runs_dir: Path) -> tuple[list[RunEntry], list[RunEntry]]:
     """``(reportable, skipped)`` over the immediate subdirectories of
-    ``runs_dir``, slug-descending (timestamp-prefixed names: newest first).
+    ``runs_dir``, slug-descending (name order — 'newest first' for the
+    tool's timestamp-prefixed run-dir names).
 
     An ``ab.json``-only directory is not reportable but never silently
     dropped: it lands in ``skipped`` with the reason, so the page can show

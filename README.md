@@ -126,7 +126,7 @@ weights) decode, and median deltas for TTFT/ITL
 (stream updates when batched), prefill per depth, and the concurrency
 medians per level.
 
-The yellow banner is always on, for a reason: cross-file comparisons are
+The orange banner is always on, for a reason: cross-file comparisons are
 **unpaired in time**, so drift between the two runs — thermal, cache-
 warmth, minutes or days apart — is indistinguishable from the change under
 test. For a verdict: run `betterbench ab`. The mismatch chips next to the
