@@ -114,7 +114,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._run_page(path[len("/run/"):], reportable, skipped)
             return
         if path == "/pair":
-            qs = {k: urllib.parse.unquote(v[0])
+            # `parse_qs` already unquotes each value exactly once — the
+            # wire carries the once-encoded slugs, so a second
+            # `urllib.parse.unquote` here would corrupt a name that
+            # contains a literal `%` (e.g. `a%2520b` → `a b`).
+            qs = {k: v[0]
                  for k, v in urllib.parse.parse_qs(sp.query).items() if v}
             for slug in (qs.get("a"), qs.get("b")):
                 bad = self._slug_404(slug, reportable, skipped)

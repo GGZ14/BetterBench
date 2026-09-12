@@ -155,6 +155,41 @@ def test_skipped_run_is_404_with_explanation(tmp_path):
         srv.server_close()
 
 
+def test_percent_named_run_round_trips_all_routes(tmp_path):
+    """A run whose directory name contains a literal `%` round-trips
+    through every route under the encode-once/decode-once convention:
+    the links are `quote(slug, safe="")` on the wire and the handler
+    decodes exactly once, so the name matches the listing."""
+    import urllib.parse
+    pct = "a%20b"                     # a dir literally named a-%-2-0-b
+    _make_run(tmp_path, pct, model="mp", endpoint="http://p:1",
+              greedy=True)
+    _make_run(tmp_path, "20260101T000000-a", model="ma",
+              endpoint="http://a:1", greedy=True)
+    enc = urllib.parse.quote(pct, safe="")       # 'a%2520b'
+    srv = session.make_server(tmp_path)
+    port = srv.server_address[1]
+    try:
+        # (a) the gallery link is the once-encoded slug
+        code, body = _get(port, "/")
+        assert code == 200
+        assert f'href="/run/{enc}"' in body
+
+        # (b) the once-encoded path decodes to the literal name
+        code, body = _get(port, f"/run/{enc}")
+        assert code == 200
+        assert "← All runs" in body
+
+        # (c) the pair route (parse_qs decodes once, nothing more)
+        code, body = _get(port,
+                          f"/pair?a={enc}&b=20260101T000000-a")
+        assert code == 200
+        # (d) the pair's iframe src is the once-encoded slug too
+        assert f'src="/run/{enc}"' in body
+    finally:
+        srv.server_close()
+
+
 def test_next_run_is_visible_on_the_next_request(tmp_path):
     _make_run(tmp_path, "20260101T000000-a", model="ma",
              endpoint="http://a:1", greedy=True)

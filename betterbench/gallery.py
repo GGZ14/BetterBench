@@ -248,7 +248,7 @@ def _reportable_row(e: RunEntry) -> str:
     m = run_manifest(e)
     chips = "".join(f'<span class="chip">{_esc(c)}</span>' for c in m["chips"])
     val = urllib.parse.quote(str(e.slug), safe="")
-    return (f'<tr><td class="slug"><a href="/run/{_esc(e.slug)}">'
+    return (f'<tr><td class="slug"><a href="/run/{_esc(val)}">'
             f'{_esc(e.slug)}</a></td>'
             f'<td>{_or_dash(m["model"])}</td>'
             f'<td class="ep">{_or_dash(m["endpoint"])}</td>'
@@ -791,10 +791,10 @@ def render_pair_page(runs_dir: Path, a_slug: str, b_slug: str) -> str:
         + chips_html
         + f"  {band}\n"
         f"  <h2>Run A — {a_slug}</h2>\n"
-        f'  <iframe class="runpane" src="/run/{_esc(a_slug)}" '
+        f'  <iframe class="runpane" src="/run/{qa}" '
         "title=\"Report A\"></iframe>\n"
         f"  <h2>Run B — {b_slug}</h2>\n"
-        f'  <iframe class="runpane" src="/run/{_esc(b_slug)}" '
+        f'  <iframe class="runpane" src="/run/{qb}" '
         "title=\"Report B\"></iframe>\n"
         "</div>\n"
         "<script>\n" + _PAIR_JS + "\n</script>\n</body>\n</html>\n")
