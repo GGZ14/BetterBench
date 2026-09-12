@@ -140,6 +140,46 @@ comparing in pairs:
 - Prefer **ITL median** as the lead signal (thousands of token samples ⇒ tight CI); per-run t/s
   needs ~100+ runs for a trustworthy p99.
 
+## Cross-run compare
+`betterbench compare A.json B.json` (a terminal table) and the no-argument
+`betterbench compare` (a browser over every run in `$BETTERBENCH_HOME/runs/`) both compare
+*saved* `results.json` files. State the main distinction up front: this is a **cross-run**
+comparison. The two runs are not interleaved — no shared prompt
+measured back-to-back under A and B — so **no common-mode drift cancels**. Everything the
+pair page shows is best-effort attribution; the only path for a drift-cancelled verdict
+remains a paired, interleaved `betterbench ab`, and the pair page's always-on banner says
+exactly that.
+
+**The pairing rule (decode stats).** The decode numbers pair *by pass index*: both runs'
+per-pass `decode_tps` series (ok passes only) are aligned positionally and truncated to
+the shorter series, then passed through `paired_compare`'s default — a paired-t CI at 95%.
+Pass index stands in for trial identity; it holds when both runs measured the same
+categories on the same corpus at the same pass count, and degrades to "the first *n*
+passes on each side" when they did not. That is exactly the ordering a corpus-version or
+pass-count mismatch chip warns about.
+
+**What carries a CI, and what is medians-only — and why.** The *decode by category* rows
+carry CIs (per the pairing rule above); the *combined decode* shows its Δ against each
+side's own stated weights, with no CI. Everything else on the page — TTFT/ITL (or
+stream-update) latency, prefill, and concurrency — is **medians-only**. The reason is not
+laziness: a CI in BetterBench is an interval on a *per-trial difference*, and the
+pass-level latency/gap series of two uninterleaved runs have **no shared trial identity** —
+there is no per-trial difference to take a paired-t on, so an interval would be
+manufactured significance. Medians display side by side with a Δ, flagged as "unpaired
+medians" with a pointer to `betterbench ab`. (The terminal form shows only the
+per-category decode table — medians, Δ%, the same 95% paired-t CI, and verdict —
+with an "unpaired in time; prefer `betterbench ab`" footer.)
+
+**The mismatch chips.** The chips row (corpus version, sampling, host, GPU, and any differing
+`--note` value) **flags, it does not block** — the page still renders, because the user
+judges comparability with all the evidence on screen that the chips then narrate. A
+corpus-version mismatch means the *prompts differed*: the combined decode Δ and the
+category Δs are apples-to-oranges even when the medians look close, and the drift caveat
+above applies on top. Same for a sampling mismatch (greedy vs temperature changes output
+length, which moves aggregate t/s independent of the server) or a GPU mismatch. When the
+chips row is empty, the page is a like-for-like comparison — but still cross-run, so the
+banner stands.
+
 ## Sample-size honesty
 A p1/p99 needs enough samples beyond the tail (`n · tail ≥ ~5`, i.e. 500 observations for a
 p99). BetterBench marks every percentile below that threshold with a `†` and records the
