@@ -100,6 +100,41 @@ betterbench report ~/.betterbench/runs/20260211-091234-qwen3-8/results.json --ht
 base directory. (`betterbench report`/`compare` read whatever path you point
 them at and write nothing unless told to.)
 
+## Compare your runs
+
+Two forms of `betterbench compare`, one keyword:
+
+```bash
+# two saved results side by side — a per-category decode table in the terminal
+betterbench compare results.json another.json
+
+# no args — an interactive session: it scans $BETTERBENCH_HOME/runs,
+# opens a browser at a gallery of every saved run, and stops on Ctrl-C
+betterbench compare
+```
+
+The no-args form serves every run directory under `$BETTERBENCH_HOME/runs/`
+(`~/.betterbench/runs/` when the variable is unset) from a loopback-only
+server that stops on Ctrl-C; the URL it prints is the entry point and the
+server writes no files. Pick a run to open its report; pick two to open the
+pair page.
+
+The pair page's comparison band shows the paired decode statistics — the
+per-pass `decode_tps` series paired by pass index, truncated to the shorter
+side, with a paired-t 95% CI and a SIG/noise verdict per category — plus the combined (weighted, each side's own
+weights) decode, and median deltas for TTFT/ITL
+(stream updates when batched), prefill per depth, and the concurrency
+medians per level.
+
+The yellow banner is always on, for a reason: cross-file comparisons are
+**unpaired in time**, so drift between the two runs — thermal, cache-
+warmth, minutes or days apart — is indistinguishable from the change under
+test. For a verdict: run `betterbench ab`. The mismatch chips next to the
+banner — corpus version, sampling, host, GPU — flag which of the deltas
+not to trust (a corpus-version mismatch means the prompts differed, so
+every Δ in that page is apples-to-oranges); a phase missing on one side
+shows as "not measured", never as zero.
+
 ## Authentication
 
 A request goes out unauthorised by default — right for a local vLLM or
