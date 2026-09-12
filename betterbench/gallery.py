@@ -345,7 +345,7 @@ _SEL_JS = """function compareSel() {
   if (checked.length < 2) return;
   var a = checked[0].value;
   var b = checked[1].value;
-  location = "/pair?a=" + encodeURIComponent(a) + "&b=" + encodeURIComponent(b);
+  location = "/pair?a=" + a + "&b=" + b;
 }
 """
 
@@ -756,6 +756,11 @@ def render_pair_page(runs_dir: Path, a_slug: str, b_slug: str) -> str:
         chips = mismatch_chips(by_slug[a_slug].results,
                                by_slug[b_slug].results)
     except Exception:
+        # Best-effort: a non-dict `notes` (or other malformed side —
+        # unlike `run_manifest`, `mismatch_chips` has no isinstance
+        # tolerance) degrades the row to "no chips" rather than
+        # dropping the page; the common case (either side a dict) is
+        # unaffected — `mismatch_chips` is total for any dicts.
         chips = []
     chips_html = ""
     if chips:

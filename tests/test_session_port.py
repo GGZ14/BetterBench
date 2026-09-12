@@ -176,6 +176,35 @@ def test_skipped_run_is_404_with_explanation(tmp_path):
         srv.server_close()
 
 
+def test_unrenderable_run_is_plain_404_not_a_reset(tmp_path):
+    """A run whose `results.json` is a JSON **list** (parseable,
+    non-object): `list_runs` reports it (anything non-`None` is
+    reportable) but `render_html` can't render a list —
+    `render_sections` hits `'list' object has no attribute 'get'`.
+    `/run/<slug>` must answer a real plain-text 404 (the connected
+    client gets a status + body), not a connection reset; the gallery
+    serves the same run as a degraded row, and `/` is unaffected."""
+    weird = tmp_path / "weird-shape-2026"
+    weird.mkdir()
+    (weird / "results.json").write_text(
+        json.dumps([{"schema": 2, "single_stream": {}}]))
+    srv = session.make_server(tmp_path)
+    port = srv.server_address[1]
+    try:
+        # An answered 404 with the pinned `not found — ` prefix; a
+        # connection reset would kill the raw client mid-response
+        # instead of yielding a status + body.
+        code, body = _get(port, "/run/weird-shape-2026")
+        assert code == 404
+        assert body.startswith("not found — ")
+        # Other routes are unaffected.
+        code, _ = _get(port, "/")
+        assert code == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
 def test_percent_named_run_round_trips_all_routes(tmp_path):
     """A run whose directory name contains a literal `%` round-trips
     through every route under the encode-once/decode-once convention:

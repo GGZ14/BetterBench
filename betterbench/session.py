@@ -98,7 +98,10 @@ class _Handler(BaseHTTPRequestHandler):
     404 bodies (plain text), in exactly these three forms: an unknown
     path → `not found`; a valid-shape slug that isn't in the listing →
     `not found — no such run: <slug>`; a listed-but-skipped slug
-    (corrupt or ab-only dir) → `not found — <RunEntry.error>`.
+    (corrupt or ab-only dir) → `not found — <RunEntry.error>`. A
+    reportable slug whose results a builder can't render also degrades
+    to the `not found — <reason>` form (render failure in
+    `_run_page`) rather than a connection reset.
     """
 
     def log_message(self, fmt, *args):
@@ -148,7 +151,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, bad, _THE_404_PLAIN)
             return
         entry = next(e for e in reportable if e.slug == slug)
-        page = render_html(entry.results)
+        try:
+            page = render_html(entry.results)
+        except Exception as exc:
+            # A reportable run whose data a builder can't decode makes
+            # the gallery's degraded row — it is not renderable here;
+            # fall back to the plain 404 rather than reset the
+            # connection.
+            self._send(404, f"not found — {exc}\n",
+                       _THE_404_PLAIN)
+            return
         bar = _session_bar(slug, reportable)
         if _WRAP_TARGET in page:
             # Inject the session bar above the report header; when the
