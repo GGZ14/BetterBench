@@ -102,6 +102,7 @@ def test_routes_serve_gallery_run_and_pair(tmp_path):
         assert '/run/20260114T000000-b' in body    # iframe B
         assert "cross-file compare is unpaired in time" in body
     finally:
+        srv.shutdown()
         srv.server_close()
 
 
@@ -128,6 +129,7 @@ def test_unknown_slugs_are_404(tmp_path):
         assert code == 404
         assert body == "not found\n"
     finally:
+        srv.shutdown()
         srv.server_close()
 
 
@@ -145,6 +147,7 @@ def test_missing_pair_param_is_plain_404(tmp_path):
         assert code == 404
         assert body == "not found\n"
     finally:
+        srv.shutdown()
         srv.server_close()
 
 
@@ -169,6 +172,7 @@ def test_skipped_run_is_404_with_explanation(tmp_path):
         except json.JSONDecodeError as je:
             assert str(je) in body           # the entry's error, verbatim
     finally:
+        srv.shutdown()
         srv.server_close()
 
 
@@ -204,6 +208,7 @@ def test_percent_named_run_round_trips_all_routes(tmp_path):
         # (d) the pair's iframe src is the once-encoded slug too
         assert f'src="/run/{enc}"' in body
     finally:
+        srv.shutdown()
         srv.server_close()
 
 
@@ -222,6 +227,7 @@ def test_next_run_is_visible_on_the_next_request(tmp_path):
         _code, body = _get(port, "/")        # re-scan: no cache anywhere
         assert "20260115T000000-b" in body
     finally:
+        srv.shutdown()
         srv.server_close()
 
 
@@ -280,8 +286,10 @@ def test_two_consecutive_sessions_get_different_ports(tmp_path):
         try:
             assert s1.server_address[1] != s2.server_address[1]
         finally:
+            s2.shutdown()
             s2.server_close()
     finally:
+        s1.shutdown()
         s1.server_close()
 
 
