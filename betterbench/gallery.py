@@ -246,36 +246,57 @@ def mismatch_chips(a: dict, b: dict) -> list[str]:
 
 
 def _reportable_row(e: RunEntry) -> str:
+    """One card row: the pick checkbox first (far left), then the slug
+    link, model, endpoint, when, the headline stats, and the chips.
+    ``.run`` is flexed with ``min-width:0`` so the chips wrap instead of
+    widening the page — no horizontal scroll."""
     m = run_manifest(e)
     chips = "".join(f'<span class="chip">{_esc(c)}</span>' for c in m["chips"])
     val = urllib.parse.quote(str(e.slug), safe="")
-    return (f'<tr><td class="slug"><a href="/run/{_esc(val)}">'
-            f'{_esc(e.slug)}</a></td>'
-            f'<td>{_or_dash(m["model"])}</td>'
-            f'<td class="ep">{_or_dash(m["endpoint"])}</td>'
-            f'<td class="when">{_esc(m["timestamp"])}</td>'
-            f'<td class="chips">{chips}</td>'
-            f'<td>{_esc(", ".join(m["phases"]) or "—")}</td>'
-            f'<td>{_fmt(m["combined_decode"])}</td>'
-            f'<td>{_fmt(m["ttft_p50"])}</td>'
-            f'<td>{_fmt(m["aggregate_top_conc"])}</td>'
-            f'<td class="pick"><input type="checkbox" name="sel" '
-            f'value="{_esc(val)}"></td></tr>')
+    stats = (f'<span>combined decode <b>{_fmt(m["combined_decode"])}</b></span>'
+             f'<span>TTFT p50 <b>{_fmt(m["ttft_p50"])}</b></span>'
+             f'<span>top-conc aggregate <b>{_fmt(m["aggregate_top_conc"])}</b></span>'
+             f'<span>phases <b>{_esc(", ".join(m["phases"]) or "—")}</b></span>')
+    return (f'<div class="row">'
+            f'<label class="pick"><input type="checkbox" name="sel" '
+            f'value="{_esc(val)}"></label>'
+            f'<div class="run">'
+            f'<div class="line1">'
+            f'<a class="slug" href="/run/{_esc(val)}">{_esc(e.slug)}</a>'
+            f'<span class="m">{_or_dash(m["model"])}</span>'
+            f'<span class="x">{_or_dash(m["endpoint"])}</span>'
+            f'<span class="t">{_esc(m["timestamp"])}</span>'
+            f'</div>'
+            f'<div class="stats">{stats}</div>'
+            f'<div class="chips">{chips}</div>'
+            f'</div></div>')
 
 
 def _degraded_row(e: RunEntry, exc: Exception) -> str:
     """The muted fallback for one reportable run whose row can't be
-    built: the same skip-row look, the exception in the error cell, so
-    the bad run stays visible and the rest of the table survives."""
-    return (f'<tr class="skip"><td class="slug">{_esc(e.slug)}</td>'
-            f'<td colspan="9" class="skiperr">'
-            f'{_esc(f"render error: {exc}")}</td></tr>')
+    built: the same skip-row look, the exception in the error span, so
+    the bad run stays visible and the rest of the list survives."""
+    return (f'<div class="skip">'
+            f'<span class="pick"></span>'
+            f'<div class="run">'
+            f'<div class="line1">'
+            f'<span class="slug">{_esc(e.slug)}</span>'
+            f'</div>'
+            f'<span class="skiperr">{_esc(f"render error: {exc}")}'
+            f'</span>'
+            f'</div></div>')
 
 
 def _skipped_row(e: RunEntry) -> str:
-    return (f'<tr class="skip"><td class="slug">{_esc(e.slug)}</td>'
-            f'<td colspan="9" class="skiperr">skipped — '
-            f'{_esc(e.error or "unreadable")}</td></tr>')
+    return (f'<div class="skip">'
+            f'<span class="pick"></span>'
+            f'<div class="run">'
+            f'<div class="line1">'
+            f'<span class="slug">{_esc(e.slug)}</span>'
+            f'</div>'
+            f'<span class="skiperr">skipped — '
+            f'{_esc(e.error or "unreadable")}</span>'
+            f'</div></div>')
 
 
 _PAGE_CSS = """  :root {
@@ -299,40 +320,48 @@ _PAGE_CSS = """  :root {
   * { box-sizing:border-box; }
   body { background:var(--page); color:var(--ink); font-family:var(--sans);
          line-height:1.55; margin:0; padding:32px 20px 72px; }
-  .wrap { max-width:1200px; margin:0 auto; display:flex; flex-direction:column; gap:26px; }
+  .wrap { max-width:1100px; margin:0 auto; display:flex; flex-direction:column; gap:26px; }
   header { display:flex; flex-direction:column; gap:13px; }
   .eyebrow { font-family:var(--mono); font-size:11px; letter-spacing:.13em;
              text-transform:uppercase; color:var(--muted); }
   h1 { font-size:clamp(26px,4vw,36px); line-height:1.12; margin:0;
        letter-spacing:-.02em; text-wrap:balance; }
   code { font-family:var(--mono); font-size:.95em; }
-  .pickbar { display:flex; align-items:center; gap:12px; }
+  .pickbar { display:flex; align-items:center; flex-wrap:wrap; gap:12px; }
   .pickbar button { font-family:var(--mono); font-size:13px;
                     color:var(--page); background:var(--ink); border:0;
                     border-radius:7px; padding:8px 15px; cursor:pointer; }
   .pickbar button:hover { background:var(--ink-2); }
   .pickbar .hint { font-family:var(--mono); font-size:12px; color:var(--muted); }
   .runs { background:var(--surface); border:1px solid var(--grid);
-          border-radius:10px; padding:14px 16px; overflow-x:auto; }
-  table { border-collapse:collapse; width:100%; font-size:12.5px;
-          font-family:var(--mono); font-variant-numeric:tabular-nums; }
-  th, td { padding:7px 12px 7px 0; text-align:right; white-space:nowrap; }
-  th:first-child, td:first-child { text-align:left; }
-  thead th { color:var(--muted); font-weight:500; font-size:10.5px;
-             letter-spacing:.07em; text-transform:uppercase;
-             border-bottom:1px solid var(--grid); }
-  tbody tr + tr td { border-top:1px solid var(--grid); }
-  tbody td { color:var(--ink-2); }
-  td.slug { color:var(--ink); }
+          border-radius:10px; padding:14px 16px; }
+  .row, .skip { display:flex; gap:16px; padding:14px 0;
+                border-bottom:1px solid var(--grid); }
+  .pick { flex:0 0 auto; padding-top:3px; display:inline-flex; }
+  .run { flex:1 1 auto; min-width:0; }
+  .line1 { display:flex; flex-wrap:wrap; gap:6px 14px;
+          font-family:var(--mono); font-size:13px; }
+  .line1 .slug { font-weight:650; word-break:break-word; }
+  .line1 a.slug { font-weight:650; word-break:break-word; }
+  .line1 .m { color:var(--ink-2); }
+  .line1 .x, .line1 .t { color:var(--muted); }
+  .stats { display:flex; flex-wrap:wrap; gap:6px 18px; margin-top:8px;
+          font-size:13px; color:var(--ink-2); font-family:var(--mono);
+          font-variant-numeric:tabular-nums; }
+  .stats b { color:var(--ink); font-weight:600; }
+  .chips { display:flex; flex-wrap: wrap; gap:6px; margin-top:8px; }
+  .chip { max-width:100%; overflow:hidden; text-overflow:ellipsis;
+         white-space:nowrap; padding:1px 8px;
+         border:1px solid var(--grid); border-radius:6px;
+         font-size:11.5px; color:var(--ink-2); background:var(--page);
+         font-family:var(--mono); }
+  .skip .slug { font-style:italic; color:var(--muted); }
+  .skip .stat, .skip .chip { color:var(--muted); }
+  .skiperr { display:block; margin-top:8px; font-family:var(--mono);
+            font-size:13px; color:var(--muted); overflow-wrap:anywhere; }
+  .skip input { visibility:hidden; }
   a { color:var(--s1); text-decoration:none; }
   a:hover { text-decoration:underline; }
-  .chips { white-space:normal; max-width:520px; }
-  .chip { display:inline-block; margin:1px 4px 1px 0; padding:1px 8px;
-          border:1px solid var(--grid); border-radius:6px;
-          font-size:11.5px; color:var(--ink-2); background:var(--page); }
-  tr.skip td { color:var(--muted); }
-  tr.skip td.skiperr { text-align:left; color:var(--muted); }
-  tr.skip td.slug { font-style:italic; }
   input[type=checkbox] { accent-color:var(--s1); }
   .empty { max-width:70ch; color:var(--ink-2); }
 """
@@ -368,18 +397,14 @@ def render_gallery(runs_dir: Path) -> str:
         except Exception as exc:
             rows.append(_degraded_row(e, exc))
     rows += [_skipped_row(e) for e in skipped]
-    table = ""
+    block = ""
     if rows:
-        table = ('\n  <div class="pickbar"><button onclick="compareSel()">'
+        block = ('\n  <div class="pickbar"><button onclick="compareSel()">'
                  'Compare selected</button>'
                  '<span class="hint">tick two runs, newest first = A</span></div>\n'
-                 '  <div class="runs">\n    <table>\n'
-                 '      <thead><tr><th>run</th><th>model</th><th>endpoint</th>'
-                 '<th>when</th><th>chips</th><th>phases</th>'
-                 '<th>combined decode t/s</th><th>ttft p50 (ms)</th>'
-                 '<th>aggregate top-conc t/s</th><th></th></tr></thead>\n'
-                 '      <tbody>\n' + "\n".join("        " + r for r in rows)
-                 + '\n      </tbody>\n    </table>\n  </div>')
+                 '  <div class="runs">\n'
+                 + "\n".join("    " + r for r in rows)
+                 + '\n  </div>')
     return (
         '<!doctype html>\n<html lang="en">\n<head>\n'
         '<meta charset="utf-8">\n'
@@ -388,7 +413,7 @@ def render_gallery(runs_dir: Path) -> str:
         + _PAGE_CSS + '\n</style>\n</head>\n<body>\n<div class="wrap">\n'
         '  <header>\n    <div class="eyebrow">BetterBench — runs</div>\n'
         '    <h1>All runs</h1>\n  </header>\n'
-        + note + "\n" + table + '\n</div>\n'
+        + note + "\n" + block + '\n</div>\n'
         '<script>\n' + _SEL_JS + "</script>\n</body>\n</html>\n")
 
 
@@ -670,6 +695,19 @@ def compare_band(a: dict, b: dict) -> str:
 
 
 _PAIR_CSS = """
+  /* Baseline table rules (moved from the page CSS so the all-runs
+     gallery can drop its wide table and its nowrap columns without
+     changing the pair page's own tables). */
+  table { border-collapse:collapse; width:100%; font-size:12.5px;
+          font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  th, td { padding:7px 12px 7px 0; text-align:right; white-space:nowrap; }
+  th:first-child, td:first-child { text-align:left; }
+  thead th { color:var(--muted); font-weight:500; font-size:10.5px;
+             letter-spacing:.07em; text-transform:uppercase;
+             border-bottom:1px solid var(--grid); }
+  tbody tr + tr td { border-top:1px solid var(--grid); }
+  tbody td { color:var(--ink-2); }
+  td.slug { color:var(--ink); }
   .cmt { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
          font-family:var(--mono); font-size:13px; }
   .cmt select { font-family:var(--mono); font-size:13px; padding:6px 8px;

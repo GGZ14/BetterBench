@@ -117,6 +117,13 @@ def test_render_gallery_lists_headline_numbers_and_links(tmp_path):
     assert 'class="skip"' in html   # the broken run is visible, not dropped
     assert "20260107T000000-bad" in html
     assert "Compare selected" in html
+    # Layout regressions: the wide 10-column table is gone, chips wrap
+    # (no horizontal scroll), and the pick checkbox is the first element
+    # of each run row — before the run link in document order.
+    assert "<table" not in html
+    assert "flex-wrap: wrap" in html
+    assert (html.index('name="sel"')
+            < html.index('href="/run/20260114T000000-new"'))
 
 
 def test_render_gallery_zero_runs_says_run(tmp_path):
