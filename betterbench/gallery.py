@@ -107,6 +107,13 @@ def _fmt(x, d=1) -> str:
 def run_manifest(e: RunEntry) -> dict:
     """Headline numbers for one reportable run, from the report row builders.
 
+    `.get`-safe: must never raise on an odd dict (missing `env`, a
+    non-dict `notes`, a non-numeric `max_model_len`, a phase entry the
+    row builders can't decode) and must never fabricate numbers — what's
+    missing is simply `None` / omitted. The row-builder calls are
+    guarded: a builder that can't decode a side's data means that number
+    is absent, not an error.
+
     Keys: name, model, endpoint, timestamp (the report's ``_pretty_ts``
     render, so a run with a colonless ``+0200`` timestamp shows the way its
     report does), chips, phases, combined_decode (weighted; None when there
@@ -117,13 +124,31 @@ def run_manifest(e: RunEntry) -> dict:
     """
     if e.results is None:
         raise ValueError(f"run {e.slug!r} has no parseable results — nothing to manifest")
+    if not isinstance(e.results, dict):
+        raise ValueError(f"run {e.slug!r} results are not an object — nothing to manifest")
     res = e.results
-    env = res["env"]
-    cfg = res.get("config", {}) or {}
-    rows = single_rows(res)
-    comb = combined_score(res, rows)
-    ttfts = [r["ttft_p50"] for r in rows if r["ttft_p50"] is not None]
-    conc = concurrency_rows(res)
+    env = res.get("env") or {}
+    if not isinstance(env, dict):
+        env = {}
+    cfg = res.get("config") or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    try:
+        rows = single_rows(res)
+    except Exception:
+        rows = []
+    try:
+        comb = combined_score(res, rows)
+    except Exception:
+        comb = None
+    try:
+        ttfts = [r["ttft_p50"] for r in rows if r.get("ttft_p50") is not None]
+    except Exception:
+        ttfts = []
+    try:
+        conc = concurrency_rows(res)
+    except Exception:
+        conc = []
     chips = [str(env.get("model", "?")),
              str(env.get("endpoint", "?")),
              "corpus v" + str(res.get("corpus_version", "?"))]
@@ -131,18 +156,25 @@ def run_manifest(e: RunEntry) -> dict:
                  else f"temp {cfg.get('temperature')}")
     chips.append("cold prefix cache (nonce)" if cfg.get("unique_nonce")
                  else "warm prefix cache")
-    for k, v in (env.get("notes") or {}).items():
-        chips.append(f"{k}: {v}")
+    notes = env.get("notes")
+    if isinstance(notes, dict):
+        for k, v in notes.items():
+            chips.append(f"{k}: {v}")
     gl = gpu_label(env)
     if gl:
         chips.append(gl)
     ctx = env.get("max_model_len")
     if ctx:
-        chips.append(f"{int(ctx):,} tok context")
+        try:
+            ctx = int(ctx)
+        except (TypeError, ValueError):
+            ctx = None
+        if ctx:
+            chips.append(f"{ctx:,} tok context")
     return {
         "name": e.slug,
-        "model": env["model"],
-        "endpoint": env["endpoint"],
+        "model": env.get("model"),
+        "endpoint": env.get("endpoint"),
         "timestamp": _pretty_ts(env.get("timestamp")),
         "chips": chips,
         "phases": phases_present(res),
@@ -218,8 +250,8 @@ def _reportable_row(e: RunEntry) -> str:
     val = urllib.parse.quote(str(e.slug), safe="")
     return (f'<tr><td class="slug"><a href="/run/{_esc(e.slug)}">'
             f'{_esc(e.slug)}</a></td>'
-            f'<td>{_esc(m["model"])}</td>'
-            f'<td class="ep">{_esc(m["endpoint"])}</td>'
+            f'<td>{_or_dash(m["model"])}</td>'
+            f'<td class="ep">{_or_dash(m["endpoint"])}</td>'
             f'<td class="when">{_esc(m["timestamp"])}</td>'
             f'<td class="chips">{chips}</td>'
             f'<td>{_esc(", ".join(m["phases"]) or "—")}</td>'
@@ -228,6 +260,15 @@ def _reportable_row(e: RunEntry) -> str:
             f'<td>{_fmt(m["aggregate_top_conc"])}</td>'
             f'<td class="pick"><input type="checkbox" name="sel" '
             f'value="{_esc(val)}"></td></tr>')
+
+
+def _degraded_row(e: RunEntry, exc: Exception) -> str:
+    """The muted fallback for one reportable run whose row can't be
+    built: the same skip-row look, the exception in the error cell, so
+    the bad run stays visible and the rest of the table survives."""
+    return (f'<tr class="skip"><td class="slug">{_esc(e.slug)}</td>'
+            f'<td colspan="9" class="skiperr">'
+            f'{_esc(f"render error: {exc}")}</td></tr>')
 
 
 def _skipped_row(e: RunEntry) -> str:
@@ -319,7 +360,12 @@ def render_gallery(runs_dir: Path) -> str:
     if not reportable:
         note = ('<p class="empty">No reportable runs here — start one with '
                 '<code>betterbench run</code>.</p>')
-    rows = [_reportable_row(e) for e in reportable]
+    rows = []
+    for e in reportable:
+        try:
+            rows.append(_reportable_row(e))
+        except Exception as exc:
+            rows.append(_degraded_row(e, exc))
     rows += [_skipped_row(e) for e in skipped]
     table = ""
     if rows:
@@ -496,16 +542,42 @@ def _latency_block(a: dict, b: dict) -> str:
                      "run `betterbench ab`"))
 
 
+def _safe_rows(builder, res: dict) -> list:
+    """One side's phase rows from a builder; an entry the builder can't
+    decode (an odd dict) degrades *that side* to no rows, so the block
+    falls back to its existing muted ``not measured on <side>`` note
+    instead of raising the whole pair page."""
+    try:
+        return builder(res)
+    except Exception:
+        return []
+
+
+def _block_fallback(title: str, note: str) -> str:
+    return (f'<h3 class="sect">{_esc(title)}</h3>\n  ' + _muted(note))
+
+
+def _guarded(title: str, note: str, make) -> str:
+    """One comparison block; any exception from the block degrades it to
+    its muted ``<phase> not measured on either run`` note rather than
+    raising the whole pair page."""
+    try:
+        return make()
+    except Exception:
+        return _block_fallback(title, note)
+
+
 def _phase_block(a: dict, b: dict, label: str, section: str,
                  key: str, cols: tuple) -> str:
     """A prefill (per `target_depth`) / concurrency (per `level`) block:
     the per-key medians side by side with the Δ, *restricted to the keys
     present on both sides*; a key missing on a side renders
     ``not measured on <side>`` in that side's cells. Degraded to a muted
-    note when the side lacks the phase entirely."""
+    note when the side lacks the phase entirely (or its entries are
+    malformed: that side's rows resolve to none)."""
     builder = prefill_rows if section == "prefill" else concurrency_rows
-    rows_a = [r for r in builder(a) if r.get("skipped") is not True]
-    rows_b = [r for r in builder(b) if r.get("skipped") is not True]
+    rows_a = [r for r in _safe_rows(builder, a) if r.get("skipped") is not True]
+    rows_b = [r for r in _safe_rows(builder, b) if r.get("skipped") is not True]
     if not rows_a and not rows_b:
         return (f'<h3 class="sect">{_esc(label)}</h3>\n  '
                 + _muted(f"{label.lower()} not measured on either run"))
@@ -574,16 +646,23 @@ def compare_band(a: dict, b: dict) -> str:
     weights). Each block degrades to a muted ``phase not measured on
     <side>`` note when that side lacks the phase — never a bare 0."""
     parts = [
-        _decode_block(a, b),
-        _latency_block(a, b),
-        _phase_block(a, b, "Prefill", "prefill", "target_depth",
-                     (("prompt-tok med", "prompt_tokens_med"),
-                      ("pp med", "pp_med"))),
-        _phase_block(a, b, "Concurrency", "concurrency", "level",
-                     (("aggregate t/s", "aggregate_tps"),
-                      ("decode med", "decode_med"),
-                      ("ttft p50 (ms)", "ttft_p50"))),
-        _combined_block(a, b),
+        _guarded("Decode by category 95% CI", "decode not measured on either run",
+                 lambda: _decode_block(a, b)),
+        _guarded("Latency (medians only)",
+                 "latency not measured on either run",
+                 lambda: _latency_block(a, b)),
+        _guarded("Prefill", "prefill not measured on either run",
+                 lambda: _phase_block(a, b, "Prefill", "prefill", "target_depth",
+                                      (("prompt-tok med", "prompt_tokens_med"),
+                                       ("pp med", "pp_med")))),
+        _guarded("Concurrency", "concurrency not measured on either run",
+                 lambda: _phase_block(a, b, "Concurrency", "concurrency", "level",
+                                      (("aggregate t/s", "aggregate_tps"),
+                                       ("decode med", "decode_med"),
+                                       ("ttft p50 (ms)", "ttft_p50")))),
+        _guarded("Combined decode",
+                 "combined decode not measured on either run",
+                 lambda: _combined_block(a, b)),
     ]
     return '<section class="tiles-cmp">\n  ' + "\n  ".join(parts) \
         + "\n</section>"
@@ -672,14 +751,22 @@ def render_pair_page(runs_dir: Path, a_slug: str, b_slug: str) -> str:
     ops_b = _select_options(reportable, exclude=a_slug)
     qa = urllib.parse.quote(a_slug, safe="")
     qb = urllib.parse.quote(b_slug, safe="")
-    chips = mismatch_chips(by_slug[a_slug].results,
-                          by_slug[b_slug].results)
+    try:
+        chips = mismatch_chips(by_slug[a_slug].results,
+                               by_slug[b_slug].results)
+    except Exception:
+        chips = []
     chips_html = ""
     if chips:
         inner = "".join(f'<span class="chip">{_esc(c)}</span>'
                         for c in chips)
         chips_html = f"  <div class=\"chips\">{inner}</div>\n"
     b_res = by_slug[b_slug].results
+    try:
+        band = compare_band(by_slug[a_slug].results, b_res)
+    except Exception:
+        band = _muted("the comparison band is unavailable for this pair — "
+                      "entire block degraded")
     return (
         '<!doctype html>\n<html lang="en">\n<head>\n'
         '<meta charset="utf-8">\n'
@@ -702,7 +789,7 @@ def render_pair_page(runs_dir: Path, a_slug: str, b_slug: str) -> str:
         "Paired decode stats below use pass-index pairing "
         "truncated to the shorter series.</div>\n"
         + chips_html
-        + f"  {compare_band(by_slug[a_slug].results, b_res)}\n"
+        + f"  {band}\n"
         f"  <h2>Run A — {a_slug}</h2>\n"
         f'  <iframe class="runpane" src="/run/{_esc(a_slug)}" '
         "title=\"Report A\"></iframe>\n"

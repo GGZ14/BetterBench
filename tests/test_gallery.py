@@ -8,12 +8,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from betterbench.gallery import list_runs, render_gallery
+from betterbench.gallery import (list_runs, render_gallery, render_pair_page,
+                                 run_manifest)
 
 
 def _make_run(root: Path, slug: str, *, model, endpoint, greedy, corpus="1.0",
               n_passes=4, with_concurrency=False, with_prefill=False,
-              broken_json=False):
+              broken_json=False, notes=None, max_model_len=None,
+              drop_conc_level=False):
     """Write `root/slug/results.json` in a minimal schema-2 shape."""
     d = root / slug
     d.mkdir(parents=True)
@@ -38,12 +40,18 @@ def _make_run(root: Path, slug: str, *, model, endpoint, greedy, corpus="1.0",
             {"level": 8, "ok": 8, "requests": 8, "aggregate_tps": 420.0,
              "ttft_ms": [210.0, 224.0], "decode_tps": [50.0, 52.0]},
         ]
+        if drop_conc_level:
+            del results["concurrency"][0]["level"]
     if with_prefill:
         results["prefill"] = [
             {"target_depth": 200, "skipped": False,
              "prompt_tokens": [150, 150], "ttft_ms": [100.0, 101.0],
              "pp_tps": [1500.0, 1550.0]},
         ]
+    if notes is not None:
+        results["env"]["notes"] = notes
+    if max_model_len is not None:
+        results["env"]["max_model_len"] = max_model_len
     (d / "results.json").write_text("{not json" if broken_json
                                     else json.dumps(results))
     return d
@@ -116,3 +124,81 @@ def test_render_gallery_zero_runs_says_run(tmp_path):
     assert "All runs" in html
     assert "betterbench run" in html
     assert "<input" not in html          # no checkboxes when nothing to compare
+
+
+def test_malformed_run_without_env_key_keeps_gallery_alive(tmp_path):
+    _make_run(tmp_path, "20260114T000000-good", model="m-good",
+             endpoint="e", greedy=True)
+    odd = tmp_path / "20260107T000000-noenv"
+    odd.mkdir()
+    (odd / "results.json").write_text(json.dumps({
+        "schema": 2, "corpus_version": "1.0",
+        "config": {"greedy": True, "temperature": 0.7,
+                   "runs_per_category": 4, "weights": {"prose": 1.0}},
+        "single_stream": {"prose": [
+            {"ok": True, "category": "prose", "ttft_ms": 48.0,
+             "decode_tps": 12.5, "update_gaps_ms": [20.0],
+             "completion_tokens": 100, "n_chunks": 100,
+             "chunking": "per_token", "finish_reason": "stop"}]},
+    }))
+    reportable, _ = list_runs(tmp_path)   # parseable -> still reportable
+    assert {e.slug for e in reportable} == {"20260114T000000-good",
+                                          "20260107T000000-noenv"}
+    html = render_gallery(tmp_path)       # the page must not die on this run
+    assert "<!doctype html>" in html
+    assert "m-good" in html and "12.5" in html   # the good run is intact
+    assert "20260107T000000-noenv" in html      # odd run stays visible
+
+
+def test_malformed_run_with_notes_as_list_keeps_gallery_alive(tmp_path):
+    _make_run(tmp_path, "20260114T000000-good", model="m-good",
+             endpoint="e", greedy=True)
+    _make_run(tmp_path, "20260107T000000-notes",
+             model="m-notes", endpoint="e", greedy=True,
+             notes=["hot", 7])
+    html = render_gallery(tmp_path)
+    assert "m-good" in html and "m-notes" in html
+    assert "render error" not in html
+
+
+def test_malformed_run_with_non_numeric_max_model_len_keeps_gallery_alive(
+        tmp_path):
+    _make_run(tmp_path, "20260114T000000-good", model="m-good",
+             endpoint="e", greedy=True)
+    _make_run(tmp_path, "20260107T000000-ctx",
+             model="m-ctx", endpoint="e", greedy=True,
+             max_model_len="128k")
+    html = render_gallery(tmp_path)
+    assert "m-good" in html and "m-ctx" in html
+    assert "tok context" not in html   # the chip is omitted, not fabricated
+    assert "render error" not in html
+
+
+def test_malformed_concurrency_entry_degrades_manifest_and_pair_page(tmp_path):
+    _make_run(tmp_path, "20260114T000000-a", model="ma", endpoint="ea",
+             greedy=True, with_concurrency=True, drop_conc_level=True)
+    _make_run(tmp_path, "20260107T000000-b", model="mb", endpoint="eb",
+             greedy=True, with_concurrency=True)
+    reportable, _ = list_runs(tmp_path)
+    a = next(e for e in reportable if e.slug == "20260114T000000-a")
+    m = run_manifest(a)                      # must not raise
+    assert m["aggregate_top_conc"] is None  # number omitted, not fabricated
+    html = render_pair_page(tmp_path, "20260114T000000-a",
+                           "20260107T000000-b")
+    assert "Concurrency" in html
+    assert "not measured on A" in html      # degraded to the muted note
+
+
+def test_non_object_results_json_is_a_muted_render_error_row(tmp_path):
+    _make_run(tmp_path, "20260114T000000-good", model="m-good",
+             endpoint="e", greedy=True)
+    odd = tmp_path / "20260107T000000-array"
+    odd.mkdir()
+    (odd / "results.json").write_text(json.dumps([1, 2, 3]))
+    reportable, _ = list_runs(tmp_path)
+    assert {e.slug for e in reportable} == {"20260114T000000-good",
+                                          "20260107T000000-array"}
+    html = render_gallery(tmp_path)
+    assert "m-good" in html                  # the good run is intact
+    assert 'class="skip"' in html           # the odd run is a muted row
+    assert "render error" in html
