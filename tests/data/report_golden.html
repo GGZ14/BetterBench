@@ -1,419 +1,11 @@
-"""Turn a results.json into a standalone, self-contained HTML report.
-
-No template engine and no network assets: the output is one file that opens
-offline and carries its own CSS, JS and data. Charts are hand-built SVG; the
-tables are rendered server-side so the report still reads with JS disabled.
-
-The numbers come from the same row builders the markdown report uses
-(:mod:`betterbench.report`), so the two can never drift apart.
-"""
-from __future__ import annotations
-
-import html
-import json
-import math
-from datetime import datetime
-
-from . import __version__
-from .report import (PHASE_SECTIONS, combined_score, concurrency_rows,
-                     has_reasoning_evidence, phases_present, prefill_rows,
-                     reasoning_rows, report_is_batched, sample_gate,
-                     single_rows, truncation_summary)
-
-
-def _num(x):
-    """JSON-safe float: NaN/inf/None all become None."""
-    if x is None:
-        return None
-    try:
-        f = float(x)
-    except (TypeError, ValueError):
-        return None
-    return f if math.isfinite(f) else None
-
-
-def _esc(x) -> str:
-    return html.escape(str(x), quote=True)
-
-
-def _fmt(x, d=1, unit="", dash="—"):
-    v = _num(x)
-    return dash if v is None else f"{v:,.{d}f}{unit}"
-
-
-def _gate(x, ok, d=1, unit=""):
-    """A percentile cell, daggered when it rests on too few samples."""
-    txt = _fmt(x, d, unit)
-    if ok or txt == "—":
-        return txt
-    return (txt + '<span class="thin" title="under-sampled percentile — see the '
-                  'note below the tables">†</span>')
-
-
-def _chip(text, swatch=None):
-    dot = f'<span class="swatch" style="background:{swatch}"></span>' if swatch else ""
-    return f'<span class="chip">{dot}{text}</span>'
-
-
-def _pretty_ts(raw: str) -> str:
-    try:
-        return datetime.fromisoformat(raw).strftime("%d %b %Y · %H:%M")
-    except (ValueError, TypeError):
-        return _esc(raw or "")
-
-
-# --------------------------------------------------------------------------- #
-# Page sections
-# --------------------------------------------------------------------------- #
-def _header(results, cfg, env) -> str:
-    sampling = "greedy" if cfg.get("greedy") else f"temp {cfg.get('temperature')}"
-    cache = "cold prefix cache (nonce)" if cfg.get("unique_nonce") else "warm prefix cache"
-    chips = [
-        _chip(_esc(env.get("model", "?")), "var(--s1)"),
-        _chip(f'<code>{_esc(env.get("endpoint", "?"))}</code>'),
-        _chip(f'corpus v{_esc(results.get("corpus_version", "?"))}'),
-        _chip(_esc(sampling)),
-        _chip(_esc(cache)),
-    ]
-    if results.get("single_stream"):
-        chips.insert(3, _chip(f'{_esc(cfg.get("runs_per_category"))} passes/cat'))
-    phases = phases_present(results)
-    if len(phases) < len(PHASE_SECTIONS):
-        chips.append(_chip(f'phases: {_esc(", ".join(phases) or "none")}'))
-    gpu = env.get("gpu") or {}
-    if gpu:
-        label = gpu.get("nvidia_smi") or gpu.get("rocm_smi_productname") or gpu.get("vendor")
-        if label:
-            chips.append(_chip(_esc(label)))
-    ctx = env.get("max_model_len")
-    if ctx:
-        chips.append(_chip(f"{int(ctx):,} tok context"))
-    for k, v in (env.get("notes") or {}).items():
-        chips.append(_chip(f"{_esc(k)}: {_esc(v)}", "var(--s2)"))
-    return f"""  <header>
-    <div class="eyebrow">BetterBench {_esc(__version__)} · {_pretty_ts(env.get("timestamp"))} · {_esc(env.get("host", "?"))}</div>
-    <h1>{_esc(env.get("model", "Benchmark run"))}</h1>
-    <div class="runbar">{"".join(chips)}</div>
-  </header>"""
-
-
-def _tile(label, value, unit, sub):
-    u = f" <small>{_esc(unit)}</small>" if unit else ""
-    return f"""      <div class="tile">
-        <span class="label">{_esc(label)}</span>
-        <span class="val">{value}{u}</span>
-        <span class="sub">{sub}</span>
-      </div>"""
-
-
-def _tiles(comb, conc, pre, cfg, batched=False) -> str:
-    t = []
-    if comb:
-        t.append(_tile("Combined decode", _fmt(comb["decode"]), "t/s",
-                       "weighted across categories"))
-        if batched:
-            t.append(_tile("Combined update p99", _fmt(comb["update_p99"]), "ms",
-                           "the stutter between stream updates"))
-        else:
-            t.append(_tile("Combined ITL 1% low", _fmt(comb["itl_low1"]), "t/s",
-                           "the trustworthy tail metric"))
-        t.append(_tile("Combined TTFT p50", _fmt(comb["ttft_p50"], 0), "ms",
-                       "single-stream, batch = 1"))
-    if conc:
-        top = conc[-1]
-        t.append(_tile(f"Aggregate @ {top['level']} concurrent",
-                       _fmt(top["aggregate_tps"]), "t/s",
-                       f"{top['ok']}/{top['requests']} ok"))
-    live = [p for p in pre if not p["skipped"]]
-    if live:
-        deep = live[-1]
-        t.append(_tile(f"Prefill @ {int(deep['target_depth']):,} tok",
-                       _fmt(deep["pp_med"], 0), "t/s", "median prompt processing"))
-    if not t:
-        return ""
-    return f'  <section class="tiles">\n{chr(10).join(t)}\n  </section>'
-
-
-def _figure(fid, title, desc, legend=(), note="") -> str:
-    leg = ""
-    if legend:
-        items = "".join(
-            f'<span><span class="swatch" style="background:{c}"></span>{_esc(n)}</span>'
-            for n, c in legend)
-        leg = f'<div class="legend">{items}</div>'
-    nt = f'<p class="note">{note}</p>' if note else ""
-    return f"""  <figure>
-    <figcaption>
-      <span class="t">{_esc(title)}</span>
-      <span class="d">{desc}</span>
-    </figcaption>
-    {leg}
-    <div class="chartbox" id="{fid}"></div>
-    {nt}
-  </figure>"""
-
-
-def _table(caption, headers, body_rows) -> str:
-    head = "".join(f"<th>{_esc(h)}</th>" for h in headers)
-    body = "\n".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>"
-                     for r in body_rows)
-    return f"""      <table>
-        <caption>{_esc(caption)}</caption>
-        <thead><tr>{head}</tr></thead>
-        <tbody>
-{body}
-        </tbody>
-      </table>"""
-
-
-def _reasoning_table(rrows) -> list[str]:
-    if not has_reasoning_evidence(rrows):
-        return []
-    body = []
-    for r in rrows:
-        share = (f"{r['reasoning_share']*100:.0f}%"
-                 if r["reasoning_share"] is not None else "—")
-        body.append([_esc(r["category"].replace("_", " ")),
-                     f"{r['known']}/{r['runs']}", share, _fmt(r["ttfa_p50"]),
-                     f"{r['never_answered']}/{r['runs']}"])
-    return [_table("Reasoning / answer split · TTFA is time to the first answer token",
-                   ["category", "runs w/ split", "reasoning share (est)",
-                    "TTFA p50 (ms)", "never reached answer"], body)]
-
-
-def _tables(rows, conc, pre, env, batched=False, rrows=()) -> list | str:
-    out = []
-    if rows and batched:
-        out.append(_table(
-            "Single-stream, batch = 1 · several tokens per stream update",
-            ["category", "passes", "TTFT p50", "TTFT p99",
-             "update p50 (ms)", "update p99 (ms)", "tok/update", "decode med",
-             "±IQR", "CV"],
-            [[_esc(r["category"].replace("_", " ")), r["runs"], _fmt(r["ttft_p50"]),
-              _gate(r["ttft_p99"], r["ttft_p99_ok"]),
-              _fmt(r["update_p50"]), _gate(r["update_p99"], r["tail_ok"]),
-              _fmt(r["tok_per_update"], 2),
-              _fmt(r["decode_med"]), _fmt(r["decode_iqr"]),
-              _fmt((r["decode_cv"] or 0) * 100, 1, "%")]
-             for r in rows]))
-    elif rows:
-        out.append(_table(
-            "Single-stream, batch = 1",
-            ["category", "passes", "TTFT p50", "TTFT p99",
-             "ITL 1% low", "ITL med", "ITL 99% high", "decode med", "±IQR", "CV"],
-            [[_esc(r["category"].replace("_", " ")), r["runs"], _fmt(r["ttft_p50"]),
-              _gate(r["ttft_p99"], r["ttft_p99_ok"]),
-              _gate(r["itl_low1"], r["tail_ok"]), _fmt(r["itl_med"]),
-              _gate(r["itl_high99"], r["tail_ok"]), _fmt(r["decode_med"]),
-              _fmt(r["decode_iqr"]), _fmt((r["decode_cv"] or 0) * 100, 1, "%")]
-             for r in rows]))
-    if conc:
-        out.append(_table(
-            "Concurrency sweep",
-            ["level", "ok/req", "aggregate t/s", "TTFT p50", "TTFT p99", "per-req decode med"],
-            [[c["level"], f"{c['ok']}/{c['requests']}", _fmt(c["aggregate_tps"]),
-              _fmt(c["ttft_p50"]), _gate(c["ttft_p99"], c["ttft_p99_ok"]),
-              _fmt(c["decode_med"])]
-             for c in conc]))
-    out += _reasoning_table(rrows)
-    if pre:
-        body = []
-        for d in pre:
-            if d["skipped"]:
-                body.append([f"{int(d['target_depth']):,}", "—", "—", "—", "<em>skipped</em>", "—"])
-            else:
-                body.append([f"{int(d['target_depth']):,}", _fmt(d["prompt_tokens_med"], 0),
-                             _fmt(d["ttft_p50"]),
-                             _gate(d["pp_low1"], d["pp_tail_ok"]), _fmt(d["pp_med"]),
-                             _gate(d["pp_p99"], d["pp_tail_ok"])])
-        out.append(_table(
-            "Prefill sweep · cold prefix cache",
-            ["target depth", "prompt tok med", "TTFT p50", "PP 1% low", "PP median", "PP 99% high"],
-            body))
-    if not out:
-        return ""
-    return f"""  <details open>
-    <summary>Full numbers</summary>
-    <div class="tscroll">
-{chr(10).join(out)}
-    </div>
-  </details>"""
-
-
-# --------------------------------------------------------------------------- #
-# Entry point
-# --------------------------------------------------------------------------- #
-def render_sections(results: dict) -> dict:
-    """Every section of the page, plus the chart data dict.
-
-    `render_html` is exactly `render_document(render_sections(results))`; the
-    compare session composes the individual sections rather than the page.
-    """
-    cfg = results.get("config", {}) or {}
-    env = results.get("env", {}) or {}
-    rows = single_rows(results)
-    conc = concurrency_rows(results)
-    pre = prefill_rows(results)
-    comb = combined_score(results, rows)
-    batched = report_is_batched(rows)
-    rrows = reasoning_rows(results)
-
-    live_pre = [p for p in pre if not p["skipped"]]
-    skipped = [int(p["target_depth"]) for p in pre if p["skipped"]]
-
-    data = {
-        "cats": [r["category"].replace("_", " ") for r in rows],
-        "runs": [r["runs"] for r in rows],
-        "decode": [_num(r["decode_med"]) for r in rows],
-        "decodeIqr": [_num(r["decode_iqr"]) for r in rows],
-        "cv": [_num((r["decode_cv"] or 0) * 100) for r in rows],
-        "itlLow": [_num(r["itl_low1"]) for r in rows],
-        "itlMed": [_num(r["itl_med"]) for r in rows],
-        "itlHigh": [_num(r["itl_high99"]) for r in rows],
-        "batched": batched,
-        "updP50": [_num(r["update_p50"]) for r in rows],
-        "updP99": [_num(r["update_p99"]) for r in rows],
-        "tokPerUpd": [_num(r["tok_per_update"]) for r in rows],
-        "ttft50": [_num(r["ttft_p50"]) for r in rows],
-        "combined": _num(comb["decode"]) if comb else None,
-        "conc": {
-            "levels": [c["level"] for c in conc],
-            "agg": [_num(c["aggregate_tps"]) for c in conc],
-            "t50": [_num(c["ttft_p50"]) for c in conc],
-            "t99": [_num(c["ttft_p99"]) for c in conc],
-            "per": [_num(c["decode_med"]) for c in conc],
-            "ok": [c["ok"] for c in conc],
-            "req": [c["requests"] for c in conc],
-        },
-        "pre": {
-            "depths": [int(p["target_depth"]) for p in live_pre],
-            "tok": [_num(p["prompt_tokens_med"]) for p in live_pre],
-            "low": [_num(p["pp_low1"]) for p in live_pre],
-            "med": [_num(p["pp_med"]) for p in live_pre],
-            "high": [_num(p["pp_p99"]) for p in live_pre],
-            "t50": [_num(p["ttft_p50"]) for p in live_pre],
-        },
-    }
-
-    figs = []
-    if rows:
-        passes_n = rows[0]["runs"] if rows else 0
-        figs.append(_figure(
-            "cb-decode", "Decode throughput by category",
-            f"Median per-pass decode t/s at batch = 1, {passes_n} passes per category. "
-            "The dashed line is the weighted combined score.",
-            note="Hover a bar for its IQR and coefficient of variation — a high CV means "
-                 "the category's passes disagree, so read small differences there with care."))
-        if batched:
-            figs.append(_figure(
-                "cb-itl", "Stream-update gap by category",
-                "This server packs several tokens into one stream update, so there is no "
-                "per-token latency to plot. These are the measured wall-clock gaps between "
-                "updates: p50 is the typical rhythm, p99 the stutter. Lower is better.",
-                legend=[("update p50", "var(--s1)"), ("update p99", "var(--s2)")],
-                note="Hover a bar for the tokens landing per update. p99 is an upper bound "
-                     "on any pause a reader feels; it is not comparable across servers that "
-                     "pack different numbers of tokens into an update."))
-        else:
-            figs.append(_figure(
-                "cb-itl", "Inter-token latency range by category",
-                "Each bar spans the 1% low to the 99% high instantaneous token rate, with a "
-                "tick at the median. Wide bars stutter; narrow bars feel smooth.",
-                legend=[("1% low → 99% high", "var(--s1-mid)"), ("median", "var(--ink)")]))
-    if conc and len(data["conc"]["levels"]) > 1:
-        figs.append(_figure(
-            "cb-conc", "Aggregate throughput under concurrency",
-            "Total tokens/sec across all in-flight requests as load rises — where this "
-            "flattens is the throughput knee."))
-        figs.append(_figure(
-            "cb-ttft", "Time-to-first-token under concurrency",
-            "Queueing shows up here first: p50 is the typical wait, p99 the tail.",
-            legend=[("TTFT p50", "var(--s1)"), ("TTFT p99", "var(--s2)")],
-            note="With a modest request count per level, p99 rests on very few "
-                 "observations — treat a spike as a prompt to re-run, not a conclusion."))
-    if len(live_pre) > 1:
-        note = ""
-        if skipped:
-            note = ("Skipped depth" + ("s " if len(skipped) > 1 else " ")
-                    + ", ".join(f"{d:,}" for d in skipped)
-                    + " — deeper than the model's context window.")
-        figs.append(_figure(
-            "cb-prefill", "Prompt processing throughput by depth",
-            "Median prefill t/s (prompt tokens ÷ TTFT) at increasing input depth, cold "
-            "prefix cache. The band spans the 1% low to the 99% high.",
-            note=note))
-
-    return {
-        "title": _esc(f'BetterBench — {env.get("model", "run")}'),
-        "header": _header(results, cfg, env),
-        "tiles": _tiles(comb, conc, pre, cfg, batched),
-        "figures": "\n".join(figs),
-        "tables": _tables(rows, conc, pre, env, batched, rrows),
-        "footer": _footer(results, env, cfg),
-        "data": data,
-    }
-
-
-def render_document(sections: dict) -> str:
-    """Fill the page shell's placeholders from a `render_sections` dict."""
-    page = _TEMPLATE
-    page = page.replace("__TITLE__", sections["title"])
-    page = page.replace("__HEADER__", sections["header"])
-    page = page.replace("__TILES__", sections["tiles"])
-    page = page.replace("__FIGURES__", sections["figures"])
-    page = page.replace("__TABLES__", sections["tables"])
-    page = page.replace("__FOOTER__", sections["footer"])
-    page = page.replace("__DATA__", json.dumps(sections["data"]))
-    return page
-
-
-def render_html(results: dict) -> str:
-    return render_document(render_sections(results))
-
-
-def _footer(results, env, cfg) -> str:
-    weights = cfg.get("weights", {}) or {}
-    w = ", ".join(f"{k} {v}" for k, v in weights.items())
-    ch = env.get("corpus_hash")
-    bits = [f"Generated by BetterBench {_esc(__version__)} from a corpus "
-            f"v{_esc(results.get('corpus_version', '?'))} run."]
-    if ch:
-        bits.append(f"Corpus hash <code>{_esc(ch)}</code>.")
-    if w:
-        bits.append(f"Combined-score weights — {_esc(w)}.")
-    bits.append("Results are only comparable within a corpus version.")
-    trunc, tot = truncation_summary(results)
-    if tot and trunc:
-        bits.append(f"Stopped at <code>max_tokens</code>: {trunc}/{tot} runs "
-                    f"({trunc / tot * 100:.0f}%) — on a thinking model a truncated "
-                    "run measures the thinking phase, not a complete answer.")
-    under = sample_gate(results)["under_sampled"]
-    if under:
-        bits.append(f"{len(under)} percentiles are marked † — they rest on fewer "
-                    "samples than <code>n · tail ≥ 5</code> requires (a p99 needs 500 "
-                    "observations), so read them as roughly the worst observed rather "
-                    "than as percentiles. The full list is under <code>sample_gate</code> "
-                    "in the results JSON. See METHODOLOGY.md §sample-size.")
-    return "  <footer>" + " ".join(bits) + "</footer>"
-
-
-# --------------------------------------------------------------------------- #
-# The page shell: tokens, layout, and a small hand-rolled SVG chart core.
-# Placeholders (__TITLE__ etc.) are filled by render_document.
-# --------------------------------------------------------------------------- #
-# The <style> and <script> block bodies are kept in PAGE_CSS / CHART_JS as
-# raw strings (in a plain literal the CSS escapes \25B8/\25BE would be parsed
-# as octal). _TEMPLATE is rebuilt from the pieces last, character-for-character.
-_PAGE_HEAD = r"""<!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__TITLE__</title>
+<title>BetterBench — fixture-model</title>
 <style>
-"""
-
-PAGE_CSS = r"""  :root {
+  :root {
     color-scheme: light;
     --page:#f9f9f7; --surface:#fcfcfb;
     --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
@@ -530,24 +122,125 @@ PAGE_CSS = r"""  :root {
   footer code { font-family:var(--mono); font-size:12px; color:var(--ink-2); }
   noscript p { font-size:13px; color:var(--ink-2); }
   @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
-"""
-
-_TEMPLATE_MID = r"""</style>
+</style>
 </head>
 <body>
 <div class="wrap">
-__HEADER__
-__TILES__
+  <header>
+    <div class="eyebrow">BetterBench 0.6.0 · 01 Jan 2025 · 00:00 · fixture-host</div>
+    <h1>fixture-model</h1>
+    <div class="runbar"><span class="chip"><span class="swatch" style="background:var(--s1)"></span>fixture-model</span><span class="chip"><code>http://127.0.0.1:0/v1</code></span><span class="chip">corpus v1.0</span><span class="chip">3 passes/cat</span><span class="chip">greedy</span><span class="chip">cold prefix cache (nonce)</span><span class="chip">NVIDIA Fixture Card</span><span class="chip">8,192 tok context</span><span class="chip"><span class="swatch" style="background:var(--s2)"></span>kernel: fixture</span></div>
+  </header>
+  <section class="tiles">
+      <div class="tile">
+        <span class="label">Combined decode</span>
+        <span class="val">100.0 <small>t/s</small></span>
+        <span class="sub">weighted across categories</span>
+      </div>
+      <div class="tile">
+        <span class="label">Combined update p99</span>
+        <span class="val">20.0 <small>ms</small></span>
+        <span class="sub">the stutter between stream updates</span>
+      </div>
+      <div class="tile">
+        <span class="label">Combined TTFT p50</span>
+        <span class="val">50 <small>ms</small></span>
+        <span class="sub">single-stream, batch = 1</span>
+      </div>
+      <div class="tile">
+        <span class="label">Aggregate @ 8 concurrent</span>
+        <span class="val">733.9 <small>t/s</small></span>
+        <span class="sub">7/8 ok</span>
+      </div>
+      <div class="tile">
+        <span class="label">Prefill @ 16,384 tok</span>
+        <span class="val">109 <small>t/s</small></span>
+        <span class="sub">median prompt processing</span>
+      </div>
+  </section>
 <noscript><p>Charts need JavaScript — the full numbers are in the tables below.</p></noscript>
-__FIGURES__
-__TABLES__
-__FOOTER__
+  <figure>
+    <figcaption>
+      <span class="t">Decode throughput by category</span>
+      <span class="d">Median per-pass decode t/s at batch = 1, 1 passes per category. The dashed line is the weighted combined score.</span>
+    </figcaption>
+    
+    <div class="chartbox" id="cb-decode"></div>
+    <p class="note">Hover a bar for its IQR and coefficient of variation — a high CV means the category's passes disagree, so read small differences there with care.</p>
+  </figure>
+  <figure>
+    <figcaption>
+      <span class="t">Stream-update gap by category</span>
+      <span class="d">This server packs several tokens into one stream update, so there is no per-token latency to plot. These are the measured wall-clock gaps between updates: p50 is the typical rhythm, p99 the stutter. Lower is better.</span>
+    </figcaption>
+    <div class="legend"><span><span class="swatch" style="background:var(--s1)"></span>update p50</span><span><span class="swatch" style="background:var(--s2)"></span>update p99</span></div>
+    <div class="chartbox" id="cb-itl"></div>
+    <p class="note">Hover a bar for the tokens landing per update. p99 is an upper bound on any pause a reader feels; it is not comparable across servers that pack different numbers of tokens into an update.</p>
+  </figure>
+  <figure>
+    <figcaption>
+      <span class="t">Aggregate throughput under concurrency</span>
+      <span class="d">Total tokens/sec across all in-flight requests as load rises — where this flattens is the throughput knee.</span>
+    </figcaption>
+    
+    <div class="chartbox" id="cb-conc"></div>
+    
+  </figure>
+  <figure>
+    <figcaption>
+      <span class="t">Time-to-first-token under concurrency</span>
+      <span class="d">Queueing shows up here first: p50 is the typical wait, p99 the tail.</span>
+    </figcaption>
+    <div class="legend"><span><span class="swatch" style="background:var(--s1)"></span>TTFT p50</span><span><span class="swatch" style="background:var(--s2)"></span>TTFT p99</span></div>
+    <div class="chartbox" id="cb-ttft"></div>
+    <p class="note">With a modest request count per level, p99 rests on very few observations — treat a spike as a prompt to re-run, not a conclusion.</p>
+  </figure>
+  <figure>
+    <figcaption>
+      <span class="t">Prompt processing throughput by depth</span>
+      <span class="d">Median prefill t/s (prompt tokens ÷ TTFT) at increasing input depth, cold prefix cache. The band spans the 1% low to the 99% high.</span>
+    </figcaption>
+    
+    <div class="chartbox" id="cb-prefill"></div>
+    <p class="note">Skipped depth 32,768 — deeper than the model's context window.</p>
+  </figure>
+  <details open>
+    <summary>Full numbers</summary>
+    <div class="tscroll">
+      <table>
+        <caption>Single-stream, batch = 1 · several tokens per stream update</caption>
+        <thead><tr><th>category</th><th>passes</th><th>TTFT p50</th><th>TTFT p99</th><th>update p50 (ms)</th><th>update p99 (ms)</th><th>tok/update</th><th>decode med</th><th>±IQR</th><th>CV</th></tr></thead>
+        <tbody>
+<tr><td>prose</td><td>1</td><td>50.0</td><td>50.0<span class="thin" title="under-sampled percentile — see the note below the tables">†</span></td><td>20.0</td><td>20.0<span class="thin" title="under-sampled percentile — see the note below the tables">†</span></td><td>4.00</td><td>100.0</td><td>0.0</td><td>0.0%</td></tr>
+<tr><td>code</td><td>1</td><td>50.0</td><td>50.0<span class="thin" title="under-sampled percentile — see the note below the tables">†</span></td><td>20.0</td><td>20.0<span class="thin" title="under-sampled percentile — see the note below the tables">†</span></td><td>1.00</td><td>100.0</td><td>0.0</td><td>0.0%</td></tr>
+        </tbody>
+      </table>
+      <table>
+        <caption>Concurrency sweep</caption>
+        <thead><tr><th>level</th><th>ok/req</th><th>aggregate t/s</th><th>TTFT p50</th><th>TTFT p99</th><th>per-req decode med</th></tr></thead>
+        <tbody>
+<tr><td>1</td><td>5/5</td><td>120.5</td><td>40.0</td><td>41.0<span class="thin" title="under-sampled percentile — see the note below the tables">†</span></td><td>120.5</td></tr>
+<tr><td>4</td><td>4/4</td><td>410.2</td><td>120.0</td><td>122.0<span class="thin" title="under-sampled percentile — see the note below the tables">†</span></td><td>102.5</td></tr>
+<tr><td>8</td><td>7/8</td><td>733.9</td><td>310.0</td><td>323.7<span class="thin" title="under-sampled percentile — see the note below the tables">†</span></td><td>91.7</td></tr>
+        </tbody>
+      </table>
+      <table>
+        <caption>Prefill sweep · cold prefix cache</caption>
+        <thead><tr><th>target depth</th><th>prompt tok med</th><th>TTFT p50</th><th>PP 1% low</th><th>PP median</th><th>PP 99% high</th></tr></thead>
+        <tbody>
+<tr><td>1,024</td><td>1,022</td><td>9.2</td><td>108.7<span class="thin" title="under-sampled percentile — see the note below the tables">†</span></td><td>111.2</td><td>113.6<span class="thin" title="under-sampled percentile — see the note below the tables">†</span></td></tr>
+<tr><td>4,096</td><td>4,089</td><td>37.6</td><td>107.7<span class="thin" title="under-sampled percentile — see the note below the tables">†</span></td><td>108.8</td><td>109.9<span class="thin" title="under-sampled percentile — see the note below the tables">†</span></td></tr>
+<tr><td>16,384</td><td>16,375</td><td>150.6</td><td>108.5<span class="thin" title="under-sampled percentile — see the note below the tables">†</span></td><td>108.8</td><td>109.0<span class="thin" title="under-sampled percentile — see the note below the tables">†</span></td></tr>
+<tr><td>32,768</td><td>—</td><td>—</td><td>—</td><td><em>skipped</em></td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </details>
+  <footer>Generated by BetterBench 0.6.0 from a corpus v1.0 run. Corpus hash <code>abcdef0123</code>. Combined-score weights — prose 0.5, code 0.5. Results are only comparable within a corpus version. Stopped at <code>max_tokens</code>: 2/2 runs (100%) — on a thinking model a truncated run measures the thinking phase, not a complete answer. 10 percentiles are marked † — they rest on fewer samples than <code>n · tail ≥ 5</code> requires (a p99 needs 500 observations), so read them as roughly the worst observed rather than as percentiles. The full list is under <code>sample_gate</code> in the results JSON. See METHODOLOGY.md §sample-size.</footer>
 </div>
 <script>
-"""
-
-CHART_JS = r""""use strict";
-const D = __DATA__;
+"use strict";
+const D = {"cats": ["prose", "code"], "runs": [1, 1], "decode": [100.0, 100.0], "decodeIqr": [0.0, 0.0], "cv": [0.0, 0.0], "itlLow": [null, 50.0], "itlMed": [null, 50.0], "itlHigh": [null, 50.0], "batched": true, "updP50": [20.0, 20.0], "updP99": [20.0, 20.0], "tokPerUpd": [4.0, 1.0], "ttft50": [50.0, 50.0], "combined": 100.0, "conc": {"levels": [1, 4, 8], "agg": [120.5, 410.25, 733.9], "t50": [40.0, 120.0, 310.0], "t99": [40.98, 121.96, 323.72], "per": [120.5, 102.5, 91.7], "ok": [5, 4, 7], "req": [5, 4, 8]}, "pre": {"depths": [1024, 4096, 16384], "tok": [1022.0, 4089.0, 16375.0], "low": [108.7, 107.7, 108.5], "med": [111.15, 108.80000000000001, 108.75], "high": [113.55099999999999, 109.878, 108.995], "t50": [9.2, 37.6, 150.6]}};
 const NS = "http://www.w3.org/2000/svg";
 const el = (n, a) => { const e = document.createElementNS(NS, n);
   for (const k in a) e.setAttribute(k, a[k]); return e; };
@@ -790,11 +483,6 @@ if (D.pre.depths.length > 1) {
                   row(null, "TTFT p50", fmt(D.pre.t50[i], 0) + " ms")
   });
 }
-"""
-
-_TEMPLATE_TAIL = r"""</script>
+</script>
 </body>
 </html>
-"""
-
-_TEMPLATE = _PAGE_HEAD + PAGE_CSS + _TEMPLATE_MID + CHART_JS + _TEMPLATE_TAIL

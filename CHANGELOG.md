@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Interactive comparison session
+
+`betterbench compare` with no arguments scans every run under `$BETTERBENCH_HOME/runs/` and opens an interactive comparison session — a gallery of all saved runs, each with its timestamp, note chips, and phase; pick two and their pair page opens with a comparison band (paired decode CIs, latency/prefill/concurrency median deltas, combined decode). The session is a loopback-only temporary server — 127.0.0.1, a kernel-picked free port, **Ctrl-C to stop** — and it writes no files of its own; it only reads run directories and serves them.
+
+### The compare band's stat honesty
+
+The band's *decode by category* rows are **paired CIs at 95%** — the per-pass `decode_tps` series paired by pass index, truncated to the shorter side. Latency, prefill, and concurrency deltas are **medians-only**: pass-level series from two uninterleaved runs have no shared trial identity, so BetterBench won't manufacture an interval. A banner on every pair page is always on: cross-file compare is unpaired in time, drift is indistinguishable from the change under test, and the verdict path is `betterbench ab`. Mismatch chips (corpus version, sampling, host, GPU, differing `--note` values) flag *which* deltas not to trust; a phase missing on one side renders "not measured", never zero.
+
 ## 0.6.0
 
 **Upgrading:** prefill throughput may read *lower* than it did on 0.5.0, and
