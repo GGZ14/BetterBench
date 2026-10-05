@@ -126,7 +126,15 @@ def _api_key(flag_value: str | None) -> str | None:
 def _resolve_out(explicit: str | None, model: str, name: str | None, fname: str) -> Path:
     """Explicit --out wins; otherwise a fresh, versioned dir under
     $BETTERBENCH_HOME (default ~/.betterbench)/runs/ — never the cwd."""
-    return Path(explicit) if explicit else allocate_run_dir(model, name) / fname
+    if not explicit:
+        return allocate_run_dir(model, name) / fname
+    p = Path(explicit)
+    if p.is_dir():
+        # A reused dir keeps the PREVIOUS run's results.json sitting there while
+        # this run writes nothing - stale numbers then read as fresh. Fail loud.
+        sys.exit(f"--out {p} is an existing directory; pass a new file path, or "
+                 "omit --out to get a versioned run dir")
+    return p
 
 
 def cmd_run(args):

@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The concurrency sweep now runs the level it names.** Blocking streams run
+  one thread each, so the sweep was bounded by asyncio's default executor —
+  `min(32, cpu+4)`, as low as 5 on a small box. A "c16" level silently
+  serialised on a 4-core client and the aggregate stopped growing, which reads
+  exactly like a server-side knee. The sweep now sizes its own executor to the
+  widest level.
+- **`BB_PREFILL_SEED` reseeds the prefill nonces per invocation.** The depth
+  sweep's RNG is seeded for reproducibility, which means a second invocation
+  asks for the same first prompt byte-for-byte — and a lane that kept its
+  prefix cache warm between runs answers that pass from cache. Export a fresh
+  seed per invocation (the runner prints nothing about this; unset, behaviour
+  and comparability are unchanged).
+- **`--out` pointing at an existing directory now fails loudly.** It used to be
+  accepted, write nothing there, and leave the *previous* run's `results.json`
+  sitting in that directory looking like this run's numbers.
+
 ## 0.6.0
 
 **Upgrading:** prefill throughput may read *lower* than it did on 0.5.0, and
