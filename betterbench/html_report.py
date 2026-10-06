@@ -15,7 +15,7 @@ import math
 from datetime import datetime
 
 from . import __version__
-from .report import (PHASE_SECTIONS, combined_score, concurrency_rows,
+from .report import (PHASE_SECTIONS, cache_hits, combined_score, concurrency_rows,
                      has_reasoning_evidence, phases_present, prefill_rows,
                      reasoning_rows, report_is_batched, sample_gate,
                      single_rows, truncation_summary)
@@ -75,6 +75,10 @@ def _header(results, cfg, env) -> str:
         _chip(_esc(sampling)),
         _chip(_esc(cache)),
     ]
+    hits = cache_hits(results)
+    if hits:
+        chips.append(_chip(f"\u26a0\ufe0f {hits} from server prefix cache \u2014 not cold",
+                           "var(--s2)"))
     if results.get("single_stream"):
         chips.insert(3, _chip(f'{_esc(cfg.get("runs_per_category"))} passes/cat'))
     phases = phases_present(results)

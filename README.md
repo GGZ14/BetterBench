@@ -199,6 +199,12 @@ place BetterBench reports prefill throughput: on the short prompts of the single
 corpus, TTFT is mostly fixed per-request overhead rather than prefill work, so a per-category
 `PP t/s` understates the real figure by more than 2x. That column is gone.
 
+Cold *within* a run. The nonce RNG is seeded so a run is reproducible, which means two
+invocations ask for the same first prompt byte-for-byte — and a server that keeps its cache
+warm between runs answers that pass from cache. Export `BETTERBENCH_PREFILL_SEED` with a
+fresh value per invocation when the lane is long-lived; unset, results stay comparable
+with earlier ones.
+
 **Run length you control** — `--passes N` sets the measured passes per category (default 20)
 and `--warmup N` the discarded ones; both override whatever a `--config` file says. `--quick`
 is the shorthand for a smoke run — 5 passes after 1 warmup — for checking that an endpoint,

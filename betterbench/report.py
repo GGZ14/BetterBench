@@ -268,6 +268,21 @@ def phases_present(results: dict) -> list[str]:
     return [label for key, label in PHASE_SECTIONS if results.get(key)]
 
 
+def cache_hits(results: dict) -> int:
+    """Requests the server says it served partly from its own prefix cache.
+
+    A nonzero count on a run that claims a cold cache means the numbers are cache
+    lookups, not prompt processing — the one thing that silently fakes a benchmark
+    on a lane with a persistent prefix-cache tier. Zero, or the server not
+    reporting it at all, is the honest result."""
+    n = sum(1 for recs in results.get("single_stream", {}).values()
+            for r in recs if r.get("cached_tokens"))
+    for key in ("concurrency", "prefill"):
+        n += sum(1 for row in results.get(key, [])
+                 for c in row.get("cached_tokens", []) if c)
+    return n
+
+
 def render_markdown(results: dict) -> str:
     L = []
     fp = results.get("env", {})
@@ -283,6 +298,10 @@ def render_markdown(results: dict) -> str:
     if results.get("single_stream"):
         bits.append(f"**passes/cat**: {cfg.get('runs_per_category')}")
     bits.append(f"prefix-cache: {'cold (nonce)' if cfg.get('unique_nonce') else 'warm'}")
+    hits = cache_hits(results)
+    if hits:
+        bits.append(f"**⚠️ {hits} requests served from the server's prefix cache — "
+                    f"these numbers are not cold**")
     if len(phases) < len(PHASE_SECTIONS):
         bits.append(f"**phases**: {', '.join(phases) or 'none'}")
     L.append("  ·  ".join(bits))

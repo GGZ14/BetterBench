@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Fixed
+
+- **The concurrency sweep now runs the level it names.** Blocking streams run
+  one thread each, so the sweep was bounded by asyncio's default executor —
+  `min(32, cpu+4)`, as low as 5 on a small box. A "c16" level silently
+  serialised on a 4-core client and the aggregate stopped growing, which reads
+  exactly like a server-side knee. The sweep now sizes its own executor to the
+  widest level.
+- **`BB_PREFILL_SEED` reseeds the prefill nonces per invocation.** The depth
+  sweep's RNG is seeded for reproducibility, which means a second invocation
+  asks for the same first prompt byte-for-byte — and a lane that kept its
+  prefix cache warm between runs answers that pass from cache. Export a fresh
+  seed per invocation (the runner prints nothing about this; unset, behaviour
+  and comparability are unchanged).
+- **Prefix-cache hits are now recorded and surfaced.** `usage.prompt_tokens_details.cached_tokens`
+  is captured per request (`cached_tokens` in `results.json`), and the report
+  header warns when a run that claims a cold cache was partly served from the
+  server's. Until now a cache-served run was indistinguishable from a real one
+  afterwards — the 0.6.0 notes tell you the number *might* be a cache lookup, and
+  nothing in the output let you check. Measured on a lane with a persistent disk
+  prefix tier: a replayed 48k-token prompt read 6.72 s cold against 0.43 s warm
+  (`cached_tokens` 47104), and the file recorded nothing about it. A server that
+  does not report the field leaves it `null`, which stays distinct from a
+  verified `0`.
+- **`--out` pointing at an existing directory now fails loudly.** It used to be
+  accepted, write nothing there, and leave the *previous* run's `results.json`
+  sitting in that directory looking like this run's numbers.
 ### Interactive comparison session
 
 `betterbench compare` with no arguments scans every run under `$BETTERBENCH_HOME/runs/` and opens an interactive comparison session — a gallery of all saved runs, each with its timestamp, note chips, and phase; pick two and their pair page opens with a comparison band (paired decode CIs, latency/prefill/concurrency median deltas, combined decode). The session is a loopback-only temporary server — 127.0.0.1, a kernel-picked free port, **Ctrl-C to stop** — and it writes no files of its own; it only reads run directories and serves them.
