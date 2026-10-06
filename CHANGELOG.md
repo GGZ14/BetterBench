@@ -16,6 +16,16 @@
   prefix cache warm between runs answers that pass from cache. Export a fresh
   seed per invocation (the runner prints nothing about this; unset, behaviour
   and comparability are unchanged).
+- **Prefix-cache hits are now recorded and surfaced.** `usage.prompt_tokens_details.cached_tokens`
+  is captured per request (`cached_tokens` in `results.json`), and the report
+  header warns when a run that claims a cold cache was partly served from the
+  server's. Until now a cache-served run was indistinguishable from a real one
+  afterwards — the 0.6.0 notes tell you the number *might* be a cache lookup, and
+  nothing in the output let you check. Measured on a lane with a persistent disk
+  prefix tier: a replayed 48k-token prompt read 6.72 s cold against 0.43 s warm
+  (`cached_tokens` 47104), and the file recorded nothing about it. A server that
+  does not report the field leaves it `null`, which stays distinct from a
+  verified `0`.
 - **`--out` pointing at an existing directory now fails loudly.** It used to be
   accepted, write nothing there, and leave the *previous* run's `results.json`
   sitting in that directory looking like this run's numbers.

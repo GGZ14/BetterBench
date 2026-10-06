@@ -96,6 +96,8 @@ async def concurrency_sweep(endpoint: str, model: str,
             # the level was streaming one token per update.
             "tokens_per_update": [r.tokens_per_update for r in ok
                                   if r.tokens_per_update],
+            "cached_tokens": [r.cached_tokens for r in ok
+                              if r.cached_tokens is not None],
             "batched_runs": sum(1 for r in ok if r.chunk_token_mismatch),
         })
     return out
@@ -177,6 +179,8 @@ async def prefill_sweep(endpoint: str, model: str, cfg: Config, log=print,
             "pp_tps": [r.pp_tps for r in ok if r.pp_tps],
             "tokens_per_update": [r.tokens_per_update for r in ok
                                   if r.tokens_per_update],
+            "cached_tokens": [r.cached_tokens for r in ok
+                              if r.cached_tokens is not None],
             "batched_runs": sum(1 for r in ok if r.chunk_token_mismatch),
         })
     return out

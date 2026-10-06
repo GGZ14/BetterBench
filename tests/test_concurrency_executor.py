@@ -27,7 +27,7 @@ N = 24
 def _result():
     return SimpleNamespace(ok=True, completion_tokens=1, ttft_ms=1.0,
                            decode_tps=1.0, tokens_per_update=1.0,
-                           chunk_token_mismatch=False)
+                           cached_tokens=None, chunk_token_mismatch=False)
 
 
 def test_a_sweep_level_starts_every_request_at_once():
