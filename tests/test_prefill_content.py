@@ -121,3 +121,13 @@ def test_the_sweep_reseeds_every_pass_unless_told_not_to(server, monkeypatch,
 
     assert len(sent) == 3
     assert (len(set(sent)) == len(sent)) is distinct_bodies
+
+
+def test_sweeps_do_not_replay_prompts_across_runs():
+    # A fixed seed would send identical prompts on every run, which a KV cache
+    # persisted to RAM/SSD would serve back from the previous run.
+    import inspect
+    from betterbench import runner
+    assert "random.Random(" in inspect.getsource(runner)
+    import re
+    assert not re.search(r"random\.Random\(\s*\d", inspect.getsource(runner))

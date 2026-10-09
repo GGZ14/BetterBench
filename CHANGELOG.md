@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Prompts no longer repeat from one run to the next
+
+Every sweep seeded its nonce generator with a constant, so each `betterbench run`
+sent the same nonces — and, for the prefill sweep, the same shuffled filler — as
+the last. A cache that lives only in the server process never noticed, but a
+tiered KV cache that persists to RAM or SSD served the previous run's prompts
+back, inflating prefill throughput. Nonce generators are now seeded from OS
+entropy.
+
 ## 0.6.0
 
 **Upgrading:** prefill throughput may read *lower* than it did on 0.5.0, and

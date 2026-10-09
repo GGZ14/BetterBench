@@ -37,7 +37,7 @@ async def single_stream(endpoint: str, model: str,
                         corpus: dict[str, list[Prompt]], cfg: Config,
                         log=print, api_key: str | None = None) -> dict[str, list[dict]]:
     results: dict[str, list[dict]] = {}
-    rng = random.Random(1234)
+    rng = random.Random()
     for cat, prompts in corpus.items():
         log(f"[single] {cat}: warmup {cfg.warmup} + {cfg.runs_per_category} runs")
         for i in range(cfg.warmup):
@@ -61,7 +61,7 @@ async def concurrency_sweep(endpoint: str, model: str,
                             corpus: dict[str, list[Prompt]], cfg: Config,
                             log=print, api_key: str | None = None) -> list[dict]:
     flat = [p for ps in corpus.values() for p in ps]
-    rng = random.Random(99)
+    rng = random.Random()
     out = []
     for level in cfg.concurrency_levels:
         log(f"[concurrency] level {level}: {cfg.concurrency_requests} requests")
@@ -108,7 +108,10 @@ async def prefill_sweep(endpoint: str, model: str, cfg: Config, log=print,
       * regardless, if the server rejects a depth at runtime with a
         context-length error, that depth is marked skipped and abandoned.
     """
-    rng = random.Random(2024)
+    # Entropy-seeded on purpose: a fixed seed replays the same nonces, hence the
+    # same prompts, on every run, and a persistent KV tier (RAM/SSD) would serve
+    # them back from the previous run.
+    rng = random.Random()
     out = []
 
     def skip_row(depth: int, reason: str) -> dict:
@@ -176,7 +179,7 @@ async def paired_ab(endpoint_a: str, endpoint_b: str, model: str,
                     log=print, api_key_a: str | None = None,
                     api_key_b: str | None = None) -> dict:
     flat = [p for ps in corpus.values() for p in ps]
-    rng = random.Random(7)
+    rng = random.Random()
     a_tps: list[float] = []; b_tps: list[float] = []
     a_itl: list[float] = []; b_itl: list[float] = []
     batched = False
