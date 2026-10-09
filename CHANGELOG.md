@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.6.1
+
+**Upgrading:** prefill throughput may read lower again on servers with a
+tiered KV cache that persists to RAM or SSD. Earlier runs could be served the
+previous run's prompts from that cache; that is no longer possible.
 
 ### Prompts no longer repeat from one run to the next
 
