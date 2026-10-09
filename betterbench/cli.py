@@ -1,4 +1,4 @@
-"""BetterBench command line: run · report · compare · ab."""
+"""BetterBench command line: run · report · compare (files | no args = interactive session) · ab."""
 from __future__ import annotations
 
 import argparse
@@ -17,7 +17,7 @@ from .metrics import paired_compare
 from .html_report import render_html
 from .report import render_ab_markdown, render_markdown, sample_gate
 from .runner import concurrency_sweep, paired_ab, prefill_sweep, single_stream
-from .runs import allocate_run_dir
+from .runs import allocate_run_dir, betterbench_home, RUNS_SUBDIR
 from . import update
 
 
@@ -126,7 +126,15 @@ def _api_key(flag_value: str | None) -> str | None:
 def _resolve_out(explicit: str | None, model: str, name: str | None, fname: str) -> Path:
     """Explicit --out wins; otherwise a fresh, versioned dir under
     $BETTERBENCH_HOME (default ~/.betterbench)/runs/ — never the cwd."""
-    return Path(explicit) if explicit else allocate_run_dir(model, name) / fname
+    if not explicit:
+        return allocate_run_dir(model, name) / fname
+    p = Path(explicit)
+    if p.is_dir():
+        # A reused dir keeps the PREVIOUS run's results.json sitting there while
+        # this run writes nothing - stale numbers then read as fresh. Fail loud.
+        sys.exit(f"--out {p} is an existing directory; pass a new file path, or "
+                 "omit --out to get a versioned run dir")
+    return p
 
 
 def cmd_run(args):
@@ -286,8 +294,14 @@ def cmd_compare(args):
     """Offline paired compare of two results.json (per-category decode-tps).
     Note: only valid if both were collected on the same warm box / interleaved —
     for a rigorous comparison use `ab`."""
-    A = json.loads(Path(args.a).read_text())
-    B = json.loads(Path(args.b).read_text())
+    if len(args.results) == 0:
+        from . import session
+        session.start(betterbench_home() / RUNS_SUBDIR)
+        return
+    if len(args.results) != 2:
+        sys.exit(f"expected 2 results files — or none, for the interactive session — got {len(args.results)}")
+    A = json.loads(Path(args.results[0]).read_text())
+    B = json.loads(Path(args.results[1]).read_text())
     print("# BetterBench compare (offline, per-category decode t/s)\n")
     print("| category | A med | B med | Δ% | 95% CI | verdict |")
     print("|---|--:|--:|--:|---|---|")
@@ -404,7 +418,9 @@ def main(argv=None):
     ab.set_defaults(func=cmd_ab)
 
     cmp = sub.add_parser("compare", help="offline compare two results.json", parents=[common])
-    cmp.add_argument("a"); cmp.add_argument("b")
+    cmp.add_argument("results", nargs="*", metavar="RESULT_JSON",
+                    help="two results.json to compare in the terminal; with "
+                         "none, opens the interactive compare session in a browser")
     cmp.set_defaults(func=cmd_compare)
 
     args = p.parse_args(argv)

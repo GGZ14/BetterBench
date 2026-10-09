@@ -172,6 +172,10 @@ class RunResult:
     pp_tps: float | None = None                          # prompt-processing (prefill) t/s
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    # Prompt tokens the server says it served from its prefix cache. None = the
+    # server does not report it; a non-zero on a run that claims a cold cache
+    # means the numbers are cache lookups, not prompt processing.
+    cached_tokens: int | None = None
     n_chunks: int = 0
     chunk_token_mismatch: bool = False
     finish_reason: str | None = None
@@ -272,6 +276,8 @@ def _finalize(res: RunResult, tl: _Timeline, t0: float, t_end: float,
     if usage:
         res.prompt_tokens = usage.get("prompt_tokens")
         res.completion_tokens = usage.get("completion_tokens")
+        det = usage.get("prompt_tokens_details") or {}
+        res.cached_tokens = det.get("cached_tokens")
     if res.n_chunks == 0:
         res.error = res.error or "no content chunks received"
         return res

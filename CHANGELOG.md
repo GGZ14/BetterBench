@@ -2,18 +2,46 @@
 
 ## 0.6.1
 
-**Upgrading:** prefill throughput may read lower again on servers with a
-tiered KV cache that persists to RAM or SSD. Earlier runs could be served the
-previous run's prompts from that cache; that is no longer possible.
+**Upgrading:** prefill throughput may read lower again on servers whose KV
+cache persists to RAM or SSD. Earlier runs could be served the previous run's
+prompts from that cache; that is no longer possible.
 
-### Prompts no longer repeat from one run to the next
+### Fixed
 
-Every sweep seeded its nonce generator with a constant, so each `betterbench run`
-sent the same nonces — and, for the prefill sweep, the same shuffled filler — as
-the last. A cache that lives only in the server process never noticed, but a
-tiered KV cache that persists to RAM or SSD served the previous run's prompts
-back, inflating prefill throughput. Nonce generators are now seeded from OS
-entropy.
+- **The concurrency sweep now runs the level it names.** Blocking streams run
+  one thread each, so the sweep was bounded by asyncio's default executor —
+  `min(32, cpu+4)`, as low as 5 on a small box. A "c16" level silently
+  serialised on a 4-core client and the aggregate stopped growing, which reads
+  exactly like a server-side knee. The sweep now sizes its own executor to the
+  widest level.
+- **Prompts no longer repeat from one run to the next.** Every sweep seeded its
+  nonce generator with a constant, so each `betterbench run` sent the same
+  nonces — and, for the prefill sweep, the same shuffled filler — as the last.
+  A cache confined to the server process never noticed, but one that persists
+  to RAM or SSD served the previous run's prompts back, inflating prefill
+  throughput. Nonce generators are now seeded from OS entropy, always; there is
+  no variable to set. The cost is that a run's prompts are no longer
+  byte-reproducible, which does not affect token counts or timing.
+- **Prefix-cache hits are now recorded and surfaced.** `usage.prompt_tokens_details.cached_tokens`
+  is captured per request (`cached_tokens` in `results.json`), and the report
+  header warns when a run that claims a cold cache was partly served from the
+  server's. Until now a cache-served run was indistinguishable from a real one
+  afterwards — the 0.6.0 notes tell you the number *might* be a cache lookup, and
+  nothing in the output let you check. Measured on a lane with a persistent disk
+  prefix tier: a replayed 48k-token prompt read 6.72 s cold against 0.43 s warm
+  (`cached_tokens` 47104), and the file recorded nothing about it. A server that
+  does not report the field leaves it `null`, which stays distinct from a
+  verified `0`.
+- **`--out` pointing at an existing directory now fails loudly.** It used to be
+  accepted, write nothing there, and leave the *previous* run's `results.json`
+  sitting in that directory looking like this run's numbers.
+### Interactive comparison session
+
+`betterbench compare` with no arguments scans every run under `$BETTERBENCH_HOME/runs/` and opens an interactive comparison session — a gallery of all saved runs, each with its timestamp, note chips, and phase; pick two and their pair page opens with a comparison band (paired decode CIs, latency/prefill/concurrency median deltas, combined decode). The session is a loopback-only temporary server — 127.0.0.1, a kernel-picked free port, **Ctrl-C to stop** — and it writes no files of its own; it only reads run directories and serves them.
+
+### The compare band's stat honesty
+
+The band's *decode by category* rows are **paired CIs at 95%** — the per-pass `decode_tps` series paired by pass index, truncated to the shorter side. Latency, prefill, and concurrency deltas are **medians-only**: pass-level series from two uninterleaved runs have no shared trial identity, so BetterBench won't manufacture an interval. A banner on every pair page is always on: cross-file compare is unpaired in time, drift is indistinguishable from the change under test, and the verdict path is `betterbench ab`. Mismatch chips (corpus version, sampling, host, GPU, differing `--note` values) flag *which* deltas not to trust; a phase missing on one side renders "not measured", never zero.
 
 ## 0.6.0
 

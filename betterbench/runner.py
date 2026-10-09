@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -60,6 +61,12 @@ async def single_stream(endpoint: str, model: str,
 async def concurrency_sweep(endpoint: str, model: str,
                             corpus: dict[str, list[Prompt]], cfg: Config,
                             log=print, api_key: str | None = None) -> list[dict]:
+    # Blocking HTTP streams run one thread each (client.stream_chat ->
+    # asyncio.to_thread), so the loop-owned executor must hold the whole
+    # requested concurrency, not the CPU-sized default. asyncio.run() shuts
+    # this loop's executor down after the sweep.
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(max_workers=max(cfg.concurrency_levels, default=1)))
     flat = [p for ps in corpus.values() for p in ps]
     rng = random.Random()
     out = []
@@ -88,6 +95,8 @@ async def concurrency_sweep(endpoint: str, model: str,
             # the level was streaming one token per update.
             "tokens_per_update": [r.tokens_per_update for r in ok
                                   if r.tokens_per_update],
+            "cached_tokens": [r.cached_tokens for r in ok
+                              if r.cached_tokens is not None],
             "batched_runs": sum(1 for r in ok if r.chunk_token_mismatch),
         })
     return out
@@ -107,6 +116,10 @@ async def prefill_sweep(endpoint: str, model: str, cfg: Config, log=print,
         decode and a small margin) is skipped up front;
       * regardless, if the server rejects a depth at runtime with a
         context-length error, that depth is marked skipped and abandoned.
+
+    The nonce RNG is seeded from OS entropy, so no two invocations send the
+    same prompt: a lane that keeps its cache warm between runs (a RAM/SSD KV
+    tier) has nothing from a previous run to serve back.
     """
     # Entropy-seeded on purpose: a fixed seed replays the same nonces, hence the
     # same prompts, on every run, and a persistent KV tier (RAM/SSD) would serve
@@ -166,6 +179,8 @@ async def prefill_sweep(endpoint: str, model: str, cfg: Config, log=print,
             "pp_tps": [r.pp_tps for r in ok if r.pp_tps],
             "tokens_per_update": [r.tokens_per_update for r in ok
                                   if r.tokens_per_update],
+            "cached_tokens": [r.cached_tokens for r in ok
+                              if r.cached_tokens is not None],
             "batched_runs": sum(1 for r in ok if r.chunk_token_mismatch),
         })
     return out
